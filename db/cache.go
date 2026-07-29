@@ -2,14 +2,16 @@ package db
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
 )
 
 type store struct {
-	mu   sync.RWMutex
-	rows []UsageRecord
+	mu         sync.RWMutex
+	rows       []UsageRecord
+	maxUpdated int64
 }
 
 // 内存缓存：全量副本 + 增量同步。
@@ -18,12 +20,21 @@ var s = &store{}
 
 func StartSync(ctx context.Context) {
 	if err := fullLoad(); err != nil {
-		// opencode 还没跑过：留空表，不影响服务启动
+		slog.Warn("opencode db initial load failed", "path", resolveDBPath(), "error", err)
 		s.mu.Lock()
 		s.rows = nil
+		s.maxUpdated = 0
 		s.mu.Unlock()
+		return
 	}
+	slog.Info("opencode db loaded", "records", Size())
 	go loop(ctx)
+}
+
+func Size() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.rows)
 }
 
 func loop(ctx context.Context) {
@@ -71,6 +82,7 @@ func fullLoad() error {
 
 	s.mu.Lock()
 	s.rows = records
+	s.maxUpdated = maxUpdated
 	s.mu.Unlock()
 	return nil
 }
@@ -92,12 +104,7 @@ func incrementalSync() error {
 	}
 
 	s.mu.RLock()
-	var since int64
-	for _, r := range s.rows {
-		if r.CreatedAt > since {
-			since = r.CreatedAt
-		}
-	}
+	since := s.maxUpdated
 	s.mu.RUnlock()
 	// 倒退 mutableWindow 覆盖 opencode 近 24h 的可写窗口，避免漏掉边界更新。
 	since -= mutableWindow.Milliseconds()
@@ -119,6 +126,7 @@ func incrementalSync() error {
 	for i, r := range s.rows {
 		index[r.CreatedAt] = i
 	}
+	var newMax int64
 	for _, r := range rows {
 		rec, ok := parseMessage(r)
 		if !ok {
@@ -130,8 +138,14 @@ func incrementalSync() error {
 			s.rows = append(s.rows, rec)
 			index[rec.CreatedAt] = len(s.rows) - 1
 		}
+		if r.TimeUpdated > newMax {
+			newMax = r.TimeUpdated
+		}
 	}
 	sort.Slice(s.rows, func(i, j int) bool { return s.rows[i].CreatedAt > s.rows[j].CreatedAt })
+	if newMax > s.maxUpdated {
+		s.maxUpdated = newMax
+	}
 	return nil
 }
 

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -15,24 +15,29 @@ const (
 	mutableWindow = 24 * time.Hour
 )
 
-var dbPath = func() string {
+// 路径搜索顺序参考 opencode 官方文档：env > ~/.local/share/opencode/opencode.db
+func resolveDBPath() string {
+	if p := os.Getenv("OPENCODE_DB_PATH"); p != "" {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".opencode", "opencode.db")
-}()
+	return filepath.Join(home, ".local", "share", "opencode", "opencode.db")
+}
 
 // openReadOnly 打开 opencode.db 为只读 + WAL 共享模式，不影响 opencode 自身的写锁。
 func openReadOnly() (*sql.DB, error) {
-	if dbPath == "" {
+	path := resolveDBPath()
+	if path == "" {
 		return nil, fmt.Errorf("cannot determine opencode db path")
 	}
-	if _, err := os.Stat(dbPath); err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=wal&_query_only=true", dbPath)
-	conn, err := sql.Open("sqlite3", dsn)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=wal&_query_only=true", path)
+	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
