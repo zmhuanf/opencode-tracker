@@ -7,6 +7,9 @@ export interface UsageRecord {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   cost: number;
+  cacheHitRate: number;
+  durationMs: number;
+  speed: number;
   createdAt: number;
 }
 
@@ -20,11 +23,14 @@ export interface Summary {
   cacheHitRate: number;
 }
 
-export interface UsageQuery {
-  start: string;
-  end: string;
+export interface UsageFilter {
+  start: number;
+  end: number;
   provider: string;
   model: string;
+}
+
+export interface UsageQuery extends UsageFilter {
   page: number;
   pageSize: number;
 }
@@ -35,4 +41,19 @@ export interface UsageResponse {
   total: number;
   page: number;
   pageSize: number;
+}
+
+export interface Pricing {
+  input: number;
+  cacheRead: number;
+  output: number;
+  cacheWrite: number;
+  multiplier: number;
+}
+
+export type PricingMap = Record<string, Pricing>;
+
+export interface PricingSaveReq {
+  key: string;
+  pricing: Pricing;
 }

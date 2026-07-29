@@ -1,4 +1,4 @@
-import type { Summary, UsageQuery, UsageResponse } from '@/types';
+import type { PricingMap, PricingSaveReq, Summary, UsageFilter, UsageResponse } from '@/types';
 
 type FengCocos = {
   Client: new (config?: any) => any;
@@ -40,8 +40,10 @@ async function call<T>(route: string, payload: unknown): Promise<T> {
 }
 
 export const api = {
-  usage: (q: UsageQuery) => call<UsageResponse>('/api/usage', q),
-  summary: (q: UsageQuery) => call<Summary>('/api/usage/summary', q),
+  usage: (q: UsageFilter & { page: number; pageSize: number }) => call<UsageResponse>('/api/usage', q),
+  summary: (q: UsageFilter) => call<Summary>('/api/usage/summary', q),
   providers: () => call<string[]>('/api/providers', ''),
   models: () => call<string[]>('/api/models', ''),
+  pricing: () => call<PricingMap>('/api/pricing', ''),
+  savePricing: (req: PricingSaveReq) => call<PricingMap>('/api/pricing/save', req),
 };

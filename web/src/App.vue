@@ -1,67 +1,109 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
-import {
-  NConfigProvider, NLayout, NLayoutHeader, NLayoutContent,
-  NMessageProvider, NSpin, NAlert, darkTheme, zhCN, dateZhCN,
-} from 'naive-ui';
+import { onMounted, ref } from 'vue';
+import { NConfigProvider, NMessageProvider, NSpin, NAlert, darkTheme, zhCN, dateZhCN } from 'naive-ui';
 import SummaryCards from '@/components/SummaryCards.vue';
 import DateRangePicker from '@/components/DateRangePicker.vue';
 import UsageTable from '@/components/UsageTable.vue';
+import PricingDialog from '@/components/PricingDialog.vue';
 import { useUsage } from '@/composables/useUsage';
+import type { Pricing } from '@/types';
 
 const u = useUsage();
 
-onMounted(async () => {
-  await u.loadOptions();
-  await u.refresh();
+const pricingShow = ref(false);
+const pricingProvider = ref('');
+const pricingModel = ref('');
+
+function onEditPricing(provider: string, model: string) {
+  pricingProvider.value = provider;
+  pricingModel.value = model;
+  pricingShow.value = true;
+}
+
+function onSavePricing(p: Pricing) {
+  u.savePricing(pricingProvider.value, pricingModel.value, p);
+}
+
+onMounted(() => {
+  u.loadOptions();
+  u.loadPricing();
 });
 </script>
 
 <template>
   <NConfigProvider :theme="darkTheme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider>
-      <NLayout style="height: 100vh">
-        <NLayoutHeader bordered style="padding: 16px 24px">
+      <div class="root">
+        <div class="header">
           <div class="header-bar">
-            <h2 class="title">OpenCode TUI 请求使用统计</h2>
+            <h2 class="title">OpenCode 请求使用统计</h2>
             <DateRangePicker
-              :range="u.range.value"
-              :provider="u.provider.value"
-              :model="u.model.value"
-              :providers="u.providers.value"
-              :models="u.models.value"
-              @update:range="(v) => (u.range.value = v)"
-              @update:provider="(v) => (u.provider.value = v)"
-              @update:model="(v) => (u.model.value = v)"
+              :range="u.range"
+              :provider="u.provider"
+              :model="u.model"
+              :providers="u.providers"
+              :models="u.models"
+              @update:range="u.setRange"
+              @update:provider="u.setProvider"
+              @update:model="u.setModel"
               @refresh="u.refresh"
             />
           </div>
-        </NLayoutHeader>
-        <NLayoutContent content-style="padding: 16px 24px">
-          <div v-if="u.error.value" class="error-wrap">
-            <NAlert type="error" :title="u.error.value" closable @close="u.error.value = null" />
+        </div>
+        <div class="body">
+          <div v-if="u.error" class="error-wrap">
+            <NAlert type="error" :title="u.error" closable @close="u.clearError" />
           </div>
           <div class="summary-wrap">
-            <NSpin :show="u.loading.value && !u.summary.value">
-              <SummaryCards :summary="u.summary.value" :loading="u.loading.value" />
+            <NSpin :show="u.summaryLoading && !u.summary">
+              <SummaryCards :summary="u.summary" />
             </NSpin>
           </div>
           <UsageTable
-            :data="u.list.value"
-            :total="u.total.value"
-            :page="u.page.value"
-            :page-size="u.pageSize.value"
-            :loading="u.loading.value"
-            @update:page="(p) => (u.page.value = p)"
-            @update:page-size="(s) => (u.pageSize.value = s)"
+            class="table-wrap"
+            :reset-key="u.resetKey"
+            :data="u.list"
+            :total="u.total"
+            :page="u.page"
+            :page-size="u.pageSize"
+            :loading="u.listLoading"
+            @update:page="u.setPage"
+            @update:page-size="u.setPageSize"
+            @edit-pricing="onEditPricing"
           />
-        </NLayoutContent>
-      </NLayout>
+          <PricingDialog
+            v-model:show="pricingShow"
+            :provider="pricingProvider"
+            :model="pricingModel"
+            :pricing="u.pricingMap[`${pricingProvider}/${pricingModel}`]"
+            @save="onSavePricing"
+          />
+        </div>
+      </div>
     </NMessageProvider>
   </NConfigProvider>
 </template>
 
 <style>
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+#app {
+  background: #101014;
+  color: rgba(255, 255, 255, 0.82);
+}
+.root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  flex-shrink: 0;
+  padding: 16px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
 .header-bar {
   display: flex;
   align-items: center;
@@ -73,11 +115,26 @@ onMounted(async () => {
   margin: 0;
   font-size: 18px;
 }
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 24px;
+  box-sizing: border-box;
+}
 .error-wrap {
   margin-bottom: 12px;
+  flex-shrink: 0;
 }
 .summary-wrap {
   margin-bottom: 16px;
   min-height: 80px;
+  flex-shrink: 0;
+}
+.table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 </style>

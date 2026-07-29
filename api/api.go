@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+
 	"github.com/zmhuanf/feng"
 	"opencode-tracker/db"
 )
@@ -35,4 +37,20 @@ func HandleProviders(feng.ServerContext) ([]string, error) {
 
 func HandleModels(feng.ServerContext) ([]string, error) {
 	return db.QueryModels(), nil
+}
+
+// HandlePricing 返回全量定价 map
+func HandlePricing(feng.ServerContext) (map[string]db.Pricing, error) {
+	return db.AllPricing(), nil
+}
+
+// HandleSavePricing 保存单条定价，持久化到 pricing.json
+func HandleSavePricing(_ feng.ServerContext, req *db.PricingSaveReq) (db.Pricing, error) {
+	if req.Key == "" {
+		return db.Pricing{}, fmt.Errorf("key is required")
+	}
+	if err := db.SavePricing(*req); err != nil {
+		return db.Pricing{}, err
+	}
+	return req.Pricing, nil
 }

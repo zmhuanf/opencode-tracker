@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 )
 
 type rawMessage struct {
@@ -24,6 +23,10 @@ type rawMessage struct {
 			Write int64 `json:"write"`
 		} `json:"cache"`
 	} `json:"tokens"`
+	Time struct {
+		Created   int64 `json:"created"`
+		Completed int64 `json:"completed"`
+	} `json:"time"`
 }
 
 type queryRow struct {
@@ -81,7 +84,7 @@ func parseMessage(row queryRow) (UsageRecord, bool) {
 	if project == "" {
 		project = "default"
 	}
-	return UsageRecord{
+	rec := UsageRecord{
 		Provider:         fallback(msg.ProviderID, "unknown"),
 		Model:            fallback(msg.ModelID, "unknown"),
 		Project:          project,
@@ -90,8 +93,16 @@ func parseMessage(row queryRow) (UsageRecord, bool) {
 		CacheReadTokens:  msg.Tokens.Cache.Read,
 		CacheWriteTokens: msg.Tokens.Cache.Write,
 		Cost:             msg.Cost,
+		CacheHitRate:     calcHitRate(msg.Tokens.Input, msg.Tokens.Cache.Read),
 		CreatedAt:        row.TimeCreated,
-	}, true
+	}
+	if msg.Time.Completed > msg.Time.Created {
+		rec.DurationMs = msg.Time.Completed - msg.Time.Created
+		if rec.OutputTokens > 0 {
+			rec.Speed = float64(rec.OutputTokens) / float64(rec.DurationMs) * 1000
+		}
+	}
+	return rec, true
 }
 
 func fallback(s, fb string) string {
@@ -109,21 +120,4 @@ func calcHitRate(input, cacheRead int64) float64 {
 		return 0
 	}
 	return float64(cacheRead) / float64(denom) * 100
-}
-
-// endOfDayInclusive 把 YYYY-MM-DD 转为该日 23:59:59.999 的毫秒时间戳。
-func endOfDayInclusive(date string) (int64, error) {
-	t, err := time.Parse("2006-01-02", date)
-	if err != nil {
-		return 0, err
-	}
-	return t.Add(24*time.Hour - time.Millisecond).UnixMilli(), nil
-}
-
-func startOfDay(date string) (int64, error) {
-	t, err := time.Parse("2006-01-02", date)
-	if err != nil {
-		return 0, err
-	}
-	return t.UnixMilli(), nil
 }

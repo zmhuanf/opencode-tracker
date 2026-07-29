@@ -35,6 +35,14 @@ func main() {
 		slog.Error("register /api/models failed", "error", err)
 		os.Exit(1)
 	}
+	if err := server.Handle("/api/pricing", api.HandlePricing); err != nil {
+		slog.Error("register /api/pricing failed", "error", err)
+		os.Exit(1)
+	}
+	if err := server.Handle("/api/pricing/save", api.HandleSavePricing); err != nil {
+		slog.Error("register /api/pricing/save failed", "error", err)
+		os.Exit(1)
+	}
 
 	// gin 仅用于托管前端构建产物。必须挂子路径，否则 /*filepath 会吞掉 feng 的 /game 和 /system。
 	engine := server.Gin()

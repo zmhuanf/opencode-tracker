@@ -1,0 +1,16 @@
+{
+  "xy2/MiniMax-M3": {
+    "input": 2.1,
+    "cacheRead": 0.42,
+    "output": 8.4,
+    "cacheWrite": 0,
+    "multiplier": 0.125
+  },
+  "xy3v/glm-5.2": {
+    "input": 8,
+    "cacheRead": 2,
+    "output": 28,
+    "cacheWrite": 2,
+    "multiplier": 0.1
+  }
+}

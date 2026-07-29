@@ -1,15 +1,18 @@
 package db
 
 type UsageRecord struct {
-	Provider        string  `json:"provider"`
-	Model           string  `json:"model"`
-	Project         string  `json:"project"`
-	InputTokens     int64   `json:"inputTokens"`
-	OutputTokens    int64   `json:"outputTokens"`
-	CacheReadTokens int64   `json:"cacheReadTokens"`
-	CacheWriteTokens int64  `json:"cacheWriteTokens"`
-	Cost            float64 `json:"cost"`
-	CreatedAt       int64   `json:"createdAt"`
+	Provider         string  `json:"provider"`
+	Model            string  `json:"model"`
+	Project          string  `json:"project"`
+	InputTokens      int64   `json:"inputTokens"`
+	OutputTokens     int64   `json:"outputTokens"`
+	CacheReadTokens  int64   `json:"cacheReadTokens"`
+	CacheWriteTokens int64   `json:"cacheWriteTokens"`
+	Cost             float64 `json:"cost"`
+	CacheHitRate     float64 `json:"cacheHitRate"`
+	DurationMs       int64   `json:"durationMs"`
+	Speed            float64 `json:"speed"`
+	CreatedAt        int64   `json:"createdAt"`
 }
 
 type Summary struct {
@@ -23,8 +26,8 @@ type Summary struct {
 }
 
 type UsageQuery struct {
-	Start    string `json:"start"`
-	End      string `json:"end"`
+	Start    int64  `json:"start"`
+	End      int64  `json:"end"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Page     int    `json:"page"`

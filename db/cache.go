@@ -151,17 +151,6 @@ func incrementalSync() error {
 
 // QueryUsage 按 q 过滤、排序、分页后返回记录切片与总数。
 func QueryUsage(q UsageQuery) ([]UsageRecord, int64) {
-	startMs, endMs := int64(0), int64(0)
-	if q.Start != "" {
-		if v, err := startOfDay(q.Start); err == nil {
-			startMs = v
-		}
-	}
-	if q.End != "" {
-		if v, err := endOfDayInclusive(q.End); err == nil {
-			endMs = v
-		}
-	}
 	page, size := normalizePaging(q.Page, q.PageSize)
 
 	s.mu.RLock()
@@ -169,10 +158,10 @@ func QueryUsage(q UsageQuery) ([]UsageRecord, int64) {
 
 	filtered := s.rows[:0:0]
 	for _, r := range s.rows {
-		if startMs > 0 && r.CreatedAt < startMs {
+		if q.Start > 0 && r.CreatedAt < q.Start {
 			continue
 		}
-		if endMs > 0 && r.CreatedAt > endMs {
+		if q.End > 0 && r.CreatedAt > q.End {
 			continue
 		}
 		if q.Provider != "" && r.Provider != q.Provider {
@@ -193,32 +182,26 @@ func QueryUsage(q UsageQuery) ([]UsageRecord, int64) {
 	if end > total {
 		end = total
 	}
-	return filtered[start:end], total
+	pageRows := filtered[start:end]
+	out := make([]UsageRecord, len(pageRows))
+	for i, r := range pageRows {
+		r.Cost = costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens)
+		out[i] = r
+	}
+	return out, total
 }
 
 func QuerySummary(q UsageQuery) Summary {
-	startMs, endMs := int64(0), int64(0)
-	if q.Start != "" {
-		if v, err := startOfDay(q.Start); err == nil {
-			startMs = v
-		}
-	}
-	if q.End != "" {
-		if v, err := endOfDayInclusive(q.End); err == nil {
-			endMs = v
-		}
-	}
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var sum Summary
 	var input, cacheRead int64
 	for _, r := range s.rows {
-		if startMs > 0 && r.CreatedAt < startMs {
+		if q.Start > 0 && r.CreatedAt < q.Start {
 			continue
 		}
-		if endMs > 0 && r.CreatedAt > endMs {
+		if q.End > 0 && r.CreatedAt > q.End {
 			continue
 		}
 		if q.Provider != "" && r.Provider != q.Provider {
@@ -232,7 +215,7 @@ func QuerySummary(q UsageQuery) Summary {
 		sum.OutputTokens += r.OutputTokens
 		sum.CacheRead += r.CacheReadTokens
 		sum.CacheWrite += r.CacheWriteTokens
-		sum.Cost += r.Cost
+		sum.Cost += costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens)
 		input += r.InputTokens
 		cacheRead += r.CacheReadTokens
 	}

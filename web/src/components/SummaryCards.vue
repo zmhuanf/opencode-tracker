@@ -3,19 +3,20 @@ import { computed } from 'vue';
 import { NCard, NStatistic, NSpace } from 'naive-ui';
 import type { Summary } from '@/types';
 
-const props = defineProps<{ summary: Summary | null; loading: boolean }>();
+const props = defineProps<{ summary: Summary | null }>();
 
 const items = computed(() => {
   const s = props.summary;
   if (!s) return [];
   return [
     { label: '总请求数', value: s.total.toLocaleString() },
+    { label: '总 Token', value: (s.inputTokens + s.outputTokens + s.cacheRead + s.cacheWrite).toLocaleString() },
     { label: '输入 Token', value: s.inputTokens.toLocaleString() },
-    { label: '输出 Token', value: s.outputTokens.toLocaleString() },
     { label: '缓存读取', value: s.cacheRead.toLocaleString() },
+    { label: '输出 Token', value: s.outputTokens.toLocaleString() },
     { label: '缓存写入', value: s.cacheWrite.toLocaleString() },
     { label: '缓存命中率', value: `${s.cacheHitRate.toFixed(2)}%` },
-    { label: '费用 (USD)', value: `$${s.cost.toFixed(4)}` },
+    { label: '费用 (RMB)', value: `¥${s.cost.toFixed(2)}` },
   ];
 });
 </script>

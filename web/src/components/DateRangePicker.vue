@@ -32,16 +32,28 @@ function onRange(ts: [number, number] | null) {
   const [s, e] = ts;
   emit('update:range', [dayjs(s), dayjs(e)]);
 }
+
+const shortcuts: Array<{ label: string; range: () => [dayjs.Dayjs, dayjs.Dayjs] }> = [
+  { label: '过去一小时', range: () => [dayjs().subtract(1, 'hour'), dayjs()] },
+  { label: '今日', range: () => [dayjs().startOf('day'), dayjs().endOf('day')] },
+  { label: '过去一周', range: () => [dayjs().subtract(7, 'day'), dayjs()] },
+  { label: '过去一月', range: () => [dayjs().subtract(1, 'month'), dayjs()] },
+  { label: '过去一年', range: () => [dayjs().subtract(1, 'year'), dayjs()] },
+];
+
+function pickShortcut(fn: () => [dayjs.Dayjs, dayjs.Dayjs]) {
+  emit('update:range', fn());
+}
 </script>
 
 <template>
   <NSpace :size="12" align="center" wrap>
     <NDatePicker
-      type="daterange"
+      type="datetimerange"
       :value="[props.range[0].valueOf(), props.range[1].valueOf()]"
       @update:value="onRange"
       clearable
-      style="width: 320px"
+      style="width: 380px"
     />
     <NSelect
       :value="props.provider ?? ''"
@@ -60,6 +72,14 @@ function onRange(ts: [number, number] | null) {
       style="width: 260px"
       @update:value="(v: string | null) => emit('update:model', v || null)"
     />
+    <NButton
+      v-for="s in shortcuts"
+      :key="s.label"
+      size="small"
+      @click="pickShortcut(s.range)"
+    >
+      {{ s.label }}
+    </NButton>
     <NButton type="primary" @click="emit('refresh')">刷新</NButton>
   </NSpace>
 </template>
