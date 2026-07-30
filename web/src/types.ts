@@ -4,6 +4,7 @@ export interface UsageRecord {
   project: string;
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   cost: number;
@@ -17,6 +18,7 @@ export interface Summary {
   total: number;
   inputTokens: number;
   outputTokens: number;
+  reasoning: number;
   cacheRead: number;
   cacheWrite: number;
   cost: number;
@@ -47,6 +49,7 @@ export interface Pricing {
   input: number;
   cacheRead: number;
   output: number;
+  reasoning: number;
   cacheWrite: number;
   multiplier: number;
 }

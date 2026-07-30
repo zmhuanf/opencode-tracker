@@ -3,6 +3,7 @@
     "input": 2.1,
     "cacheRead": 0.42,
     "output": 8.4,
+    "reasoning": 0,
     "cacheWrite": 0,
     "multiplier": 0.125
   },
@@ -10,6 +11,7 @@
     "input": 8,
     "cacheRead": 2,
     "output": 28,
+    "reasoning": 0,
     "cacheWrite": 2,
     "multiplier": 0.1
   }

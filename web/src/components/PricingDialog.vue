@@ -15,7 +15,7 @@ const emit = defineEmits<{
   (e: 'save', pricing: Pricing): void;
 }>();
 
-const empty: Pricing = { input: 0, cacheRead: 0, output: 0, cacheWrite: 0, multiplier: 1 };
+const empty: Pricing = { input: 0, cacheRead: 0, output: 0, reasoning: 0, cacheWrite: 0, multiplier: 1 };
 const form = reactive<Pricing>({ ...empty });
 
 watch(
@@ -53,6 +53,7 @@ function close() {
         <NFormItem label="输入 Token"><NInputNumber v-model:value="form.input" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="缓存读取"><NInputNumber v-model:value="form.cacheRead" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="输出 Token"><NInputNumber v-model:value="form.output" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
+        <NFormItem label="思考"><NInputNumber v-model:value="form.reasoning" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="缓存写入"><NInputNumber v-model:value="form.cacheWrite" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="倍率"><NInputNumber v-model:value="form.multiplier" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
       </NForm>

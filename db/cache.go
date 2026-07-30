@@ -185,7 +185,7 @@ func QueryUsage(q UsageQuery) ([]UsageRecord, int64) {
 	pageRows := filtered[start:end]
 	out := make([]UsageRecord, len(pageRows))
 	for i, r := range pageRows {
-		r.Cost = costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens)
+		r.Cost = costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens, r.ReasoningTokens)
 		out[i] = r
 	}
 	return out, total
@@ -213,9 +213,10 @@ func QuerySummary(q UsageQuery) Summary {
 		sum.Total++
 		sum.InputTokens += r.InputTokens
 		sum.OutputTokens += r.OutputTokens
+		sum.Reasoning += r.ReasoningTokens
 		sum.CacheRead += r.CacheReadTokens
 		sum.CacheWrite += r.CacheWriteTokens
-		sum.Cost += costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens)
+		sum.Cost += costOf(r.Provider, r.Model, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens, r.ReasoningTokens)
 		input += r.InputTokens
 		cacheRead += r.CacheReadTokens
 	}

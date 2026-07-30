@@ -10,13 +10,14 @@ const items = computed(() => {
   if (!s) return [];
   return [
     { label: '总请求数', value: s.total.toLocaleString() },
-    { label: '总 Token', value: (s.inputTokens + s.outputTokens + s.cacheRead + s.cacheWrite).toLocaleString() },
+    { label: '总 Token', value: (s.inputTokens + s.outputTokens + s.reasoning + s.cacheRead + s.cacheWrite).toLocaleString() },
     { label: '输入 Token', value: s.inputTokens.toLocaleString() },
     { label: '缓存读取', value: s.cacheRead.toLocaleString() },
     { label: '输出 Token', value: s.outputTokens.toLocaleString() },
+    { label: '思考', value: s.reasoning.toLocaleString() },
     { label: '缓存写入', value: s.cacheWrite.toLocaleString() },
     { label: '缓存命中率', value: `${s.cacheHitRate.toFixed(2)}%` },
-    { label: '费用 (RMB)', value: `¥${s.cost.toFixed(2)}` },
+    { label: '费用', value: `¥${s.cost.toFixed(2)}` },
   ];
 });
 </script>

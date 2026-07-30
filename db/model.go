@@ -6,6 +6,7 @@ type UsageRecord struct {
 	Project          string  `json:"project"`
 	InputTokens      int64   `json:"inputTokens"`
 	OutputTokens     int64   `json:"outputTokens"`
+	ReasoningTokens  int64   `json:"reasoningTokens"`
 	CacheReadTokens  int64   `json:"cacheReadTokens"`
 	CacheWriteTokens int64   `json:"cacheWriteTokens"`
 	Cost             float64 `json:"cost"`
@@ -19,6 +20,7 @@ type Summary struct {
 	Total        int64   `json:"total"`
 	InputTokens  int64   `json:"inputTokens"`
 	OutputTokens int64   `json:"outputTokens"`
+	Reasoning    int64   `json:"reasoning"`
 	CacheRead    int64   `json:"cacheRead"`
 	CacheWrite   int64   `json:"cacheWrite"`
 	Cost         float64 `json:"cost"`

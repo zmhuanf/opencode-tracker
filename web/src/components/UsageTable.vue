@@ -90,6 +90,13 @@ const columns: DataTableColumns<UsageRecord> = [
     render: (r) => r.outputTokens.toLocaleString(),
   },
   {
+    title: '思考',
+    key: 'reasoningTokens',
+    align: 'right',
+    width: 110,
+    render: (r) => r.reasoningTokens.toLocaleString(),
+  },
+  {
     title: '缓存写入',
     key: 'cacheWriteTokens',
     align: 'right',
@@ -101,7 +108,7 @@ const columns: DataTableColumns<UsageRecord> = [
     key: 'cost',
     align: 'right',
     width: 100,
-    render: (r) => `¥${r.cost.toFixed(3)}`,
+    render: (r) => (r.cost > 0 ? `¥${r.cost.toFixed(3)}` : '-'),
   },
 ];
 

@@ -13,6 +13,7 @@ type Pricing struct {
 	Input      float64 `json:"input"`
 	CacheRead  float64 `json:"cacheRead"`
 	Output     float64 `json:"output"`
+	Reasoning  float64 `json:"reasoning"`
 	CacheWrite float64 `json:"cacheWrite"`
 	Multiplier float64 `json:"multiplier"`
 }
@@ -106,17 +107,18 @@ func SavePricing(req PricingSaveReq) error {
 
 // calcCost 按 token 用量和定价算费用（人民币）
 // 单价均为每百万 token，最终费用 = 各项 token/1e6*单价 之和 再乘倍率
-func calcCost(input, cacheRead, output, cacheWrite int64, p Pricing) float64 {
+func calcCost(input, cacheRead, output, cacheWrite, reasoning int64, p Pricing) float64 {
 	const perMillion = 1_000_000
 	raw := float64(input)/perMillion*p.Input +
 		float64(cacheRead)/perMillion*p.CacheRead +
 		float64(output)/perMillion*p.Output +
+		float64(reasoning)/perMillion*p.Reasoning +
 		float64(cacheWrite)/perMillion*p.CacheWrite
 	return raw * p.Multiplier
 }
 
 // costOf 查定价并算费用，未定义返回 0
-func costOf(provider, model string, input, cacheRead, output, cacheWrite int64) float64 {
+func costOf(provider, model string, input, cacheRead, output, cacheWrite, reasoning int64) float64 {
 	ensurePricingLoaded()
 	pMu.RLock()
 	p, ok := pCache[provider+"/"+model]
@@ -124,5 +126,5 @@ func costOf(provider, model string, input, cacheRead, output, cacheWrite int64) 
 	if !ok {
 		return 0
 	}
-	return calcCost(input, cacheRead, output, cacheWrite, p)
+	return calcCost(input, cacheRead, output, cacheWrite, reasoning, p)
 }

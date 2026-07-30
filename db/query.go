@@ -16,9 +16,10 @@ type rawMessage struct {
 	ModelID     string `json:"modelID"`
 	Cost        float64 `json:"cost"`
 	Tokens      struct {
-		Input  int64 `json:"input"`
-		Output int64 `json:"output"`
-		Cache  struct {
+		Input     int64 `json:"input"`
+		Output    int64 `json:"output"`
+		Reasoning int64 `json:"reasoning"`
+		Cache     struct {
 			Read  int64 `json:"read"`
 			Write int64 `json:"write"`
 		} `json:"cache"`
@@ -90,6 +91,7 @@ func parseMessage(row queryRow) (UsageRecord, bool) {
 		Project:          project,
 		InputTokens:      msg.Tokens.Input,
 		OutputTokens:     msg.Tokens.Output,
+		ReasoningTokens:  msg.Tokens.Reasoning,
 		CacheReadTokens:  msg.Tokens.Cache.Read,
 		CacheWriteTokens: msg.Tokens.Cache.Write,
 		Cost:             msg.Cost,
@@ -98,8 +100,9 @@ func parseMessage(row queryRow) (UsageRecord, bool) {
 	}
 	if msg.Time.Completed > msg.Time.Created {
 		rec.DurationMs = msg.Time.Completed - msg.Time.Created
-		if rec.OutputTokens > 0 {
-			rec.Speed = float64(rec.OutputTokens) / float64(rec.DurationMs) * 1000
+		gen := rec.OutputTokens + rec.ReasoningTokens
+		if gen > 0 {
+			rec.Speed = float64(gen) / float64(rec.DurationMs) * 1000
 		}
 	}
 	return rec, true
