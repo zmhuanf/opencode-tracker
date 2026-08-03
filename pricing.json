@@ -1,11 +1,39 @@
 {
+  "ds/deepseek-v4-flash": {
+    "input": 1,
+    "cacheRead": 0.02,
+    "output": 2,
+    "reasoning": 2,
+    "cacheWrite": 0,
+    "multiplier": 1,
+    "peakTimes": [
+      "9:00-12:00",
+      "14:00-18:00"
+    ],
+    "peakMultiplier": 2
+  },
+  "deepseek/deepseek-v4-flash": {
+    "input": 1,
+    "cacheRead": 0.02,
+    "output": 2,
+    "reasoning": 2,
+    "cacheWrite": 0,
+    "multiplier": 1,
+    "peakTimes": [
+      "9:00-12:00",
+      "14:00-18:00"
+    ],
+    "peakMultiplier": 2
+  },
   "xy2/MiniMax-M3": {
     "input": 2.1,
     "cacheRead": 0.42,
     "output": 8.4,
     "reasoning": 0,
     "cacheWrite": 0,
-    "multiplier": 0.125
+    "multiplier": 0.125,
+    "peakTimes": null,
+    "peakMultiplier": 0
   },
   "xy3v/glm-5.2": {
     "input": 8,
@@ -13,6 +41,8 @@
     "output": 28,
     "reasoning": 0,
     "cacheWrite": 2,
-    "multiplier": 0.1
+    "multiplier": 0.1,
+    "peakTimes": null,
+    "peakMultiplier": 0
   }
 }

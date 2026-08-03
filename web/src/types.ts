@@ -52,6 +52,9 @@ export interface Pricing {
   reasoning: number;
   cacheWrite: number;
   multiplier: number;
+  peakMultiplier: number;
+  peakTimes: string[];
+  peakDates: string[];
 }
 
 export type PricingMap = Record<string, Pricing>;

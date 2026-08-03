@@ -5,14 +5,9 @@ import type { DataTableColumns } from 'naive-ui';
 import dayjs from 'dayjs';
 import type { UsageRecord } from '@/types';
 
-// 毫秒转可读时长：<1s 显示 ms，>=1s 显示带一位小数的最大单位
+// 毫秒转秒，四舍五入取整
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  const m = s / 60;
-  if (m < 60) return `${m.toFixed(1)}m`;
-  return `${(m / 60).toFixed(1)}h`;
+  return Math.round(ms / 1000).toString();
 }
 
 const props = defineProps<{
@@ -59,7 +54,7 @@ const columns: DataTableColumns<UsageRecord> = [
     align: 'left',
     width: 80,
     className: 'metric-gap',
-    render: (r) => (r.speed > 0 ? r.speed.toFixed(1) : '-'),
+    render: (r) => (r.speed > 0 ? Math.round(r.speed).toString() : '-'),
   },
   {
     title: '输入 Token',

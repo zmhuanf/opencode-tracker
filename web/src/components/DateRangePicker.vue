@@ -34,11 +34,11 @@ function onRange(ts: [number, number] | null) {
 }
 
 const shortcuts: Array<{ label: string; range: () => [dayjs.Dayjs, dayjs.Dayjs] }> = [
-  { label: '过去一小时', range: () => [dayjs().subtract(1, 'hour'), dayjs()] },
+  { label: '过去一小时', range: () => [dayjs().subtract(1, 'hour'), dayjs().endOf('day')] },
   { label: '今日', range: () => [dayjs().startOf('day'), dayjs().endOf('day')] },
-  { label: '过去一周', range: () => [dayjs().subtract(7, 'day'), dayjs()] },
-  { label: '过去一月', range: () => [dayjs().subtract(1, 'month'), dayjs()] },
-  { label: '过去一年', range: () => [dayjs().subtract(1, 'year'), dayjs()] },
+  { label: '过去一周', range: () => [dayjs().subtract(7, 'day').startOf('day'), dayjs().endOf('day')] },
+  { label: '过去一月', range: () => [dayjs().subtract(1, 'month').startOf('day'), dayjs().endOf('day')] },
+  { label: '过去一年', range: () => [dayjs().subtract(1, 'year').startOf('day'), dayjs().endOf('day')] },
 ];
 
 function pickShortcut(fn: () => [dayjs.Dayjs, dayjs.Dayjs]) {

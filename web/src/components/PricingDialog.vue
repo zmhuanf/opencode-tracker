@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { reactive, watch } from 'vue';
-import { NModal, NCard, NForm, NFormItem, NInputNumber, NButton, NSpace, NText } from 'naive-ui';
+import { NModal, NCard, NForm, NFormItem, NInputNumber, NInput, NButton, NSpace, NText } from 'naive-ui';
 import type { Pricing } from '@/types';
 
 const props = defineProps<{
@@ -15,19 +15,45 @@ const emit = defineEmits<{
   (e: 'save', pricing: Pricing): void;
 }>();
 
-const empty: Pricing = { input: 0, cacheRead: 0, output: 0, reasoning: 0, cacheWrite: 0, multiplier: 1 };
+const empty: Pricing = { input: 0, cacheRead: 0, output: 0, reasoning: 0, cacheWrite: 0, multiplier: 1, peakMultiplier: 1, peakTimes: [], peakDates: [] };
 const form = reactive<Pricing>({ ...empty });
 
 watch(
   () => props.show,
   (v) => {
-    if (v) Object.assign(form, props.pricing ?? empty);
+    if (v) {
+      // 先重置为空模板再覆盖，避免旧数据缺字段时残留上一行配置
+      Object.assign(form, empty, props.pricing ?? {});
+      form.peakTimes = Array.isArray(form.peakTimes) ? [...form.peakTimes] : [];
+      form.peakDates = Array.isArray(form.peakDates) ? [...form.peakDates] : [];
+    }
   },
 );
 
 function save() {
-  emit('save', { ...form });
+  // 过滤空白行，兼容旧数据 peakTimes 为空
+  emit('save', {
+    ...form,
+    peakTimes: form.peakTimes.map((s) => s.trim()).filter(Boolean),
+    peakDates: form.peakDates.map((s) => s.trim()).filter(Boolean),
+  });
   emit('update:show', false);
+}
+
+function addPeak() {
+  form.peakTimes.push('');
+}
+
+function removePeak(i: number) {
+  form.peakTimes.splice(i, 1);
+}
+
+function addPeakDate() {
+  form.peakDates.push('');
+}
+
+function removePeakDate(i: number) {
+  form.peakDates.splice(i, 1);
 }
 
 function close() {
@@ -56,6 +82,25 @@ function close() {
         <NFormItem label="思考"><NInputNumber v-model:value="form.reasoning" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="缓存写入"><NInputNumber v-model:value="form.cacheWrite" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
         <NFormItem label="倍率"><NInputNumber v-model:value="form.multiplier" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
+        <NFormItem label="高峰倍率"><NInputNumber v-model:value="form.peakMultiplier" :min="0" :show-button="false" style="width: 100%" /></NFormItem>
+        <NFormItem label="高峰时间段">
+          <div style="width: 100%">
+            <div v-for="(_, i) in form.peakTimes" :key="i" style="display: flex; gap: 8px; margin-bottom: 8px">
+              <NInput v-model:value="form.peakTimes[i]" placeholder="HH:mm-HH:mm，支持跨天" />
+              <NButton size="small" quaternary type="error" @click="removePeak(i)">移除</NButton>
+            </div>
+            <NButton size="tiny" quaternary type="primary" @click="addPeak">添加时间段</NButton>
+          </div>
+        </NFormItem>
+        <NFormItem label="启用日期">
+          <div style="width: 100%">
+            <div v-for="(_, i) in form.peakDates" :key="i" style="display: flex; gap: 8px; margin-bottom: 8px">
+              <NInput v-model:value="form.peakDates[i]" placeholder="如 2025.11.1-* 或 *-2025.11.1" />
+              <NButton size="small" quaternary type="error" @click="removePeakDate(i)">移除</NButton>
+            </div>
+            <NButton size="tiny" quaternary type="primary" @click="addPeakDate">添加日期区间</NButton>
+          </div>
+        </NFormItem>
       </NForm>
       <template #footer>
         <NSpace justify="end">
