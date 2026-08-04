@@ -44,6 +44,7 @@ export const api = {
   summary: (q: UsageFilter) => call<Summary>('/api/usage/summary', q),
   providers: () => call<string[]>('/api/providers', ''),
   models: () => call<string[]>('/api/models', ''),
+  agents: () => call<string[]>('/api/agents', ''),
   pricing: () => call<PricingMap>('/api/pricing', ''),
   savePricing: (req: PricingSaveReq) => call<PricingMap>('/api/pricing/save', req),
 };

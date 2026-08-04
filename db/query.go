@@ -86,6 +86,7 @@ func parseMessage(row queryRow) (UsageRecord, bool) {
 		project = "default"
 	}
 	rec := UsageRecord{
+		Agent:            "opencode",
 		Provider:         fallback(msg.ProviderID, "unknown"),
 		Model:            fallback(msg.ModelID, "unknown"),
 		Project:          project,

@@ -4,18 +4,26 @@ import dayjs from 'dayjs';
 
 const props = defineProps<{
   range: [dayjs.Dayjs, dayjs.Dayjs];
+  agent: string | null;
   provider: string | null;
   model: string | null;
+  agents: string[];
   providers: string[];
   models: string[];
 }>();
 
 const emit = defineEmits<{
   (e: 'update:range', value: [dayjs.Dayjs, dayjs.Dayjs]): void;
+  (e: 'update:agent', value: string | null): void;
   (e: 'update:provider', value: string | null): void;
   (e: 'update:model', value: string | null): void;
   (e: 'refresh'): void;
 }>();
+
+const agentOptions = () => [
+  { label: '全部 Agent', value: '' },
+  ...props.agents.map((a) => ({ label: a, value: a })),
+];
 
 const providerOptions = () => [
   { label: '全部提供商', value: '' },
@@ -48,6 +56,14 @@ function pickShortcut(fn: () => [dayjs.Dayjs, dayjs.Dayjs]) {
 
 <template>
   <NSpace :size="12" align="center" wrap>
+    <NSelect
+      :value="props.agent ?? ''"
+      :options="agentOptions()"
+      placeholder="Agent"
+      clearable
+      style="width: 140px"
+      @update:value="(v: string | null) => emit('update:agent', v || null)"
+    />
     <NDatePicker
       type="datetimerange"
       :value="[props.range[0].valueOf(), props.range[1].valueOf()]"

@@ -39,6 +39,10 @@ func HandleModels(feng.ServerContext) ([]string, error) {
 	return db.QueryModels(), nil
 }
 
+func HandleAgents(feng.ServerContext) ([]string, error) {
+	return db.QueryAgents(), nil
+}
+
 // HandlePricing 返回全量定价 map
 func HandlePricing(feng.ServerContext) (map[string]db.Pricing, error) {
 	return db.AllPricing(), nil

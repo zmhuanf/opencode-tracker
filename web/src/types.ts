@@ -1,4 +1,5 @@
 export interface UsageRecord {
+  agent: string;
   provider: string;
   model: string;
   project: string;
@@ -28,6 +29,7 @@ export interface Summary {
 export interface UsageFilter {
   start: number;
   end: number;
+  agent: string;
   provider: string;
   model: string;
 }

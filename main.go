@@ -35,6 +35,10 @@ func main() {
 		slog.Error("register /api/models failed", "error", err)
 		os.Exit(1)
 	}
+	if err := server.Handle("/api/agents", api.HandleAgents); err != nil {
+		slog.Error("register /api/agents failed", "error", err)
+		os.Exit(1)
+	}
 	if err := server.Handle("/api/pricing", api.HandlePricing); err != nil {
 		slog.Error("register /api/pricing failed", "error", err)
 		os.Exit(1)

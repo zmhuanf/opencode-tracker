@@ -33,6 +33,12 @@ const columns: DataTableColumns<UsageRecord> = [
     fixed: 'left',
     render: (r) => dayjs(r.createdAt).format('YYYY-MM-DD HH:mm:ss'),
   },
+  {
+    title: 'Agent',
+    key: 'agent',
+    width: 90,
+    render: (r) => r.agent,
+  },
   { title: '提供商', key: 'provider', width: 160 },
   {
     title: '模型',
@@ -174,7 +180,7 @@ onBeforeUnmount(() => {
       :columns="columns"
       :data="props.data"
       :loading="props.loading"
-      :row-key="(r: UsageRecord) => `${r.createdAt}-${r.provider}-${r.model}`"
+      :row-key="(r: UsageRecord) => `${r.agent}-${r.createdAt}-${r.provider}-${r.model}`"
       :max-height="maxHeight"
       remote
       striped

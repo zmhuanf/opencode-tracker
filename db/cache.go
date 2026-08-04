@@ -3,7 +3,11 @@ package db
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,6 +16,7 @@ type store struct {
 	mu         sync.RWMutex
 	rows       []UsageRecord
 	maxUpdated int64
+	piFiles    map[string]piFileStamp
 }
 
 // 内存缓存：全量副本 + 增量同步。
@@ -25,9 +30,9 @@ func StartSync(ctx context.Context) {
 		s.rows = nil
 		s.maxUpdated = 0
 		s.mu.Unlock()
-		return
 	}
-	slog.Info("opencode db loaded", "records", Size())
+	syncPi()
+	slog.Info("usage db loaded", "records", Size(), "agents", QueryAgents())
 	go loop(ctx)
 }
 
@@ -46,6 +51,7 @@ func loop(ctx context.Context) {
 			return
 		case <-t.C:
 			_ = incrementalSync()
+			syncPi()
 		}
 	}
 }
@@ -122,9 +128,9 @@ func incrementalSync() error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	index := make(map[int64]int, len(s.rows))
+	index := make(map[string]int, len(s.rows))
 	for i, r := range s.rows {
-		index[r.CreatedAt] = i
+		index[agentKey(r.Agent, r.CreatedAt)] = i
 	}
 	var newMax int64
 	for _, r := range rows {
@@ -132,11 +138,11 @@ func incrementalSync() error {
 		if !ok {
 			continue
 		}
-		if i, exists := index[rec.CreatedAt]; exists {
+		if i, exists := index[agentKey(rec.Agent, rec.CreatedAt)]; exists {
 			s.rows[i] = rec
 		} else {
 			s.rows = append(s.rows, rec)
-			index[rec.CreatedAt] = len(s.rows) - 1
+			index[agentKey(rec.Agent, rec.CreatedAt)] = len(s.rows) - 1
 		}
 		if r.TimeUpdated > newMax {
 			newMax = r.TimeUpdated
@@ -147,6 +153,72 @@ func incrementalSync() error {
 		s.maxUpdated = newMax
 	}
 	return nil
+}
+
+// agentKey 生成存储内行的唯一 key：(agent, createdAt)。
+// opencode 与 pi 的 createdAt 独立自增，可能撞值，必须带上 agent 区分。
+func agentKey(agent string, createdAt int64) string {
+	return agent + ":" + strconv.FormatInt(createdAt, 10)
+}
+
+// syncPi 增量同步 pi 会话目录：
+// 用 (size, mtime) 指纹对比上次扫描，只有文件新增/变更/删除时才重新解析。
+// pi 文件量小，变更时直接全量重建 agent=pi 的子集。
+func syncPi() {
+	dir := piSessionDir()
+	if dir == "" {
+		return
+	}
+	type piFileEntry struct {
+		path  string
+		stamp piFileStamp
+	}
+	var files []piFileEntry
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".jsonl") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		files = append(files, piFileEntry{path, piFileStamp{size: info.Size(), mtime: info.ModTime().UnixMilli()}})
+		return nil
+	})
+
+	s.mu.RLock()
+	changed := len(files) != len(s.piFiles)
+	seen := make(map[string]bool, len(files))
+	if !changed {
+		for _, f := range files {
+			seen[f.path] = true
+			if st, ok := s.piFiles[f.path]; !ok || st != f.stamp {
+				changed = true
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if !changed {
+		return
+	}
+
+	records := loadPiRecords()
+
+	s.mu.Lock()
+	kept := s.rows[:0:0]
+	for _, r := range s.rows {
+		if r.Agent != "pi" {
+			kept = append(kept, r)
+		}
+	}
+	s.rows = append(kept, records...)
+	sort.Slice(s.rows, func(i, j int) bool { return s.rows[i].CreatedAt > s.rows[j].CreatedAt })
+	s.piFiles = make(map[string]piFileStamp, len(files))
+	for _, f := range files {
+		s.piFiles[f.path] = f.stamp
+	}
+	s.mu.Unlock()
 }
 
 // QueryUsage 按 q 过滤、排序、分页后返回记录切片与总数。
@@ -162,6 +234,9 @@ func QueryUsage(q UsageQuery) ([]UsageRecord, int64) {
 			continue
 		}
 		if q.End > 0 && r.CreatedAt > q.End {
+			continue
+		}
+		if q.Agent != "" && r.Agent != q.Agent {
 			continue
 		}
 		if q.Provider != "" && r.Provider != q.Provider {
@@ -204,6 +279,9 @@ func QuerySummary(q UsageQuery) Summary {
 		if q.End > 0 && r.CreatedAt > q.End {
 			continue
 		}
+		if q.Agent != "" && r.Agent != q.Agent {
+			continue
+		}
 		if q.Provider != "" && r.Provider != q.Provider {
 			continue
 		}
@@ -230,6 +308,10 @@ func QueryProviders() []string {
 
 func QueryModels() []string {
 	return uniqueValues(func(r UsageRecord) string { return r.Model })
+}
+
+func QueryAgents() []string {
+	return uniqueValues(func(r UsageRecord) string { return r.Agent })
 }
 
 func uniqueValues(f func(UsageRecord) string) []string {

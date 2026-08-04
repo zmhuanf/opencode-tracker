@@ -1,6 +1,7 @@
 package db
 
 type UsageRecord struct {
+	Agent            string  `json:"agent"`
 	Provider         string  `json:"provider"`
 	Model            string  `json:"model"`
 	Project          string  `json:"project"`
@@ -30,6 +31,7 @@ type Summary struct {
 type UsageQuery struct {
 	Start    int64  `json:"start"`
 	End      int64  `json:"end"`
+	Agent    string `json:"agent"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
 	Page     int    `json:"page"`

@@ -5,6 +5,7 @@ import type { Pricing, PricingMap, Summary, UsageRecord } from '@/types';
 
 export interface UsageState {
   range: [dayjs.Dayjs, dayjs.Dayjs];
+  agent: string | null;
   provider: string | null;
   model: string | null;
   page: number;
@@ -15,6 +16,7 @@ export interface UsageState {
   listLoading: boolean;
   summaryLoading: boolean;
   error: string | null;
+  agents: string[];
   providers: string[];
   models: string[];
   pricingMap: PricingMap;
@@ -22,6 +24,7 @@ export interface UsageState {
   setPage(p: number): void;
   setPageSize(s: number): void;
   setRange(v: [dayjs.Dayjs, dayjs.Dayjs]): void;
+  setAgent(v: string | null): void;
   setProvider(v: string | null): void;
   setModel(v: string | null): void;
   clearError(): void;
@@ -36,6 +39,7 @@ export interface UsageState {
 export function useUsage(): UsageState {
   const state = reactive({
     range: [dayjs().startOf('day'), dayjs().endOf('day')] as [dayjs.Dayjs, dayjs.Dayjs],
+    agent: null as string | null,
     provider: null as string | null,
     model: null as string | null,
     page: 1,
@@ -47,6 +51,7 @@ export function useUsage(): UsageState {
     listLoading: false,
     summaryLoading: false,
     error: null as string | null,
+    agents: [] as string[],
     providers: [] as string[],
     models: [] as string[],
     pricingMap: {} as PricingMap,
@@ -57,6 +62,7 @@ export function useUsage(): UsageState {
   const filter = computed(() => ({
     start: state.range[0].valueOf(),
     end: state.range[1].valueOf(),
+    agent: state.agent ?? '',
     provider: state.provider ?? '',
     model: state.model ?? '',
   }));
@@ -91,9 +97,10 @@ export function useUsage(): UsageState {
 
   async function loadOptions() {
     try {
-      const [ps, ms] = await Promise.all([api.providers(), api.models()]);
+      const [ps, ms, ags] = await Promise.all([api.providers(), api.models(), api.agents()]);
       state.providers = ps;
       state.models = ms;
+      state.agents = ags;
     } catch {
       // 选项加载失败不影响主表格
     }
@@ -123,6 +130,9 @@ export function useUsage(): UsageState {
   function setRange(v: [dayjs.Dayjs, dayjs.Dayjs]) {
     state.range = v;
   }
+  function setAgent(v: string | null) {
+    state.agent = v;
+  }
   function setProvider(v: string | null) {
     state.provider = v;
   }
@@ -151,7 +161,7 @@ export function useUsage(): UsageState {
   return Object.assign(state, {
     resetKey: resetKey.value,
     get resetKeyRef() { return resetKey; },
-    setPage, setPageSize, setRange, setProvider, setModel, clearError,
+    setPage, setPageSize, setRange, setAgent, setProvider, setModel, clearError,
     loadList, loadSummary, loadOptions, loadPricing, savePricing, refresh,
   }) as unknown as UsageState;
 }
