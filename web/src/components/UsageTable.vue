@@ -55,6 +55,18 @@ const columns: DataTableColumns<UsageRecord> = [
     render: (r) => (r.durationMs > 0 ? formatDuration(r.durationMs) : '-'),
   },
   {
+    // 首字耗时：优先展示到首段可见文本，无文本时回落到首 token（含思考）
+    title: '首字',
+    key: 'firstTextMs',
+    align: 'left',
+    width: 80,
+    className: 'metric-tight',
+    render: (r) => {
+      const ms = r.firstTextMs > 0 ? r.firstTextMs : r.firstTokenMs;
+      return ms > 0 ? formatDuration(ms) : '-';
+    },
+  },
+  {
     title: '速度',
     key: 'speed',
     align: 'left',

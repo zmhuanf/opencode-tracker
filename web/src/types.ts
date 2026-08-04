@@ -10,6 +10,8 @@ export interface UsageRecord {
   cacheWriteTokens: number;
   cost: number;
   cacheHitRate: number;
+  firstTokenMs: number;
+  firstTextMs: number;
   durationMs: number;
   speed: number;
   createdAt: number;

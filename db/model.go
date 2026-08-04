@@ -12,6 +12,8 @@ type UsageRecord struct {
 	CacheWriteTokens int64   `json:"cacheWriteTokens"`
 	Cost             float64 `json:"cost"`
 	CacheHitRate     float64 `json:"cacheHitRate"`
+	FirstTokenMs     int64   `json:"firstTokenMs"`
+	FirstTextMs      int64   `json:"firstTextMs"`
 	DurationMs       int64   `json:"durationMs"`
 	Speed            float64 `json:"speed"`
 	CreatedAt        int64   `json:"createdAt"`
@@ -39,9 +41,9 @@ type UsageQuery struct {
 }
 
 type UsageResponse struct {
-	List    []UsageRecord `json:"list"`
-	Summary Summary       `json:"summary"`
-	Total   int64         `json:"total"`
-	Page    int           `json:"page"`
-	PageSize int          `json:"pageSize"`
+	List     []UsageRecord `json:"list"`
+	Summary  Summary       `json:"summary"`
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"pageSize"`
 }
