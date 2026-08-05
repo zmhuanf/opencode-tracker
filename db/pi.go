@@ -65,7 +65,7 @@ const timingMatchWindow = 60 * 1000
 
 type piUsage struct {
 	Input      int64 `json:"input"`
-	Output     int64 `json:"output"`
+	Output     int64 `json:"output"` // pi 语义同 completion_tokens，已含 reasoning
 	Reasoning  int64 `json:"reasoning"`
 	CacheRead  int64 `json:"cacheRead"`
 	CacheWrite int64 `json:"cacheWrite"`
@@ -158,7 +158,7 @@ func parsePiFile(path string) []UsageRecord {
 			Model:            fallback(e.Message.Model, "unknown"),
 			Project:          project,
 			InputTokens:      u.Input,
-			OutputTokens:     u.Output,
+			OutputTokens:     max(0, u.Output-u.Reasoning), // output 含 thinking，落库为真实输出
 			ReasoningTokens:  u.Reasoning,
 			CacheReadTokens:  u.CacheRead,
 			CacheWriteTokens: u.CacheWrite,

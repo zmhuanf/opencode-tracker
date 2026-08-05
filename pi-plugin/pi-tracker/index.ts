@@ -100,7 +100,8 @@ export default function (pi: ExtensionAPI) {
         firstTokenMs,
         firstTextMs,
         durationMs,
-        outputTokens: u?.output ?? 0,
+        // 与追踪器口径一致：output 含 thinking，减去后为真实输出
+        outputTokens: Math.max(0, (u?.output ?? 0) - (u?.reasoning ?? 0)),
         reasoningTokens: u?.reasoning ?? 0,
       });
     }
