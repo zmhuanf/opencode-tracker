@@ -55,14 +55,14 @@ const columns: DataTableColumns<UsageRecord> = [
     render: (r) => (r.durationMs > 0 ? formatDuration(r.durationMs) : '-'),
   },
   {
-    // 首字耗时：优先展示到首段可见文本，无文本时回落到首 token（含思考）
+    // 首字耗时：到模型首个吐字（思考/正文任先），思考一开始即定格；无流式事件时回落首段文本
     title: '首字',
-    key: 'firstTextMs',
+    key: 'firstTokenMs',
     align: 'left',
     width: 80,
     className: 'metric-tight',
     render: (r) => {
-      const ms = r.firstTextMs > 0 ? r.firstTextMs : r.firstTokenMs;
+      const ms = r.firstTokenMs > 0 ? r.firstTokenMs : r.firstTextMs;
       return ms > 0 ? formatDuration(ms) : '-';
     },
   },

@@ -30,7 +30,7 @@ if errorlevel 1 (
 popd
 
 echo [3/3] Copying assets...
-copy /y "%ROOT%pricing.json" "%ROOT%out\" >nul
+rem copy /y "%ROOT%pricing.json" "%ROOT%out\" >nul
 
 echo Done. Output: out
 endlocal

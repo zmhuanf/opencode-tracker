@@ -174,6 +174,10 @@ func parsePiFile(path string) []UsageRecord {
 // applyPiTiming 把下一条可用的计时条目挂到记录上。
 // 插件随消息顺序写 timing，因此按序消费即可；用时间窗口兜底：
 // 插件中途安装时，历史记录之前没有 timing，直接跳过，不会错配到后面的条目。
+//
+// 旧版插件以 message_start 回调时刻为起点，丢掉了排队/首字节延迟；
+// 数据里留有原始时间戳，这里统一以 messageTimestamp（请求发出时刻）
+// 为基准重算，历史坏数据和新插件落的数据都得到一致语义。
 func applyPiTiming(rec *UsageRecord, timings *[]piTiming) {
 	if len(*timings) == 0 {
 		return
@@ -185,9 +189,23 @@ func applyPiTiming(rec *UsageRecord, timings *[]piTiming) {
 		return
 	}
 	*timings = (*timings)[1:]
-	rec.FirstTokenMs = t.FirstTokenMs
-	rec.FirstTextMs = t.FirstTextMs
-	rec.DurationMs = t.DurationMs
+	if t.MessageTimestamp > 0 {
+		// 只有原始时间戳晚于请求起点才算真实时刻，否则保持零
+		if t.FirstToken > t.MessageTimestamp {
+			rec.FirstTokenMs = t.FirstToken - t.MessageTimestamp
+		}
+		if t.FirstText > t.MessageTimestamp {
+			rec.FirstTextMs = t.FirstText - t.MessageTimestamp
+		}
+		if t.End > t.MessageTimestamp {
+			rec.DurationMs = t.End - t.MessageTimestamp
+		}
+	} else {
+		// 老数据缺 messageTimestamp 时退回插件原值
+		rec.FirstTokenMs = t.FirstTokenMs
+		rec.FirstTextMs = t.FirstTextMs
+		rec.DurationMs = t.DurationMs
+	}
 	gen := rec.OutputTokens + rec.ReasoningTokens
 	if rec.DurationMs > 0 && gen > 0 {
 		rec.Speed = float64(gen) / float64(rec.DurationMs) * 1000

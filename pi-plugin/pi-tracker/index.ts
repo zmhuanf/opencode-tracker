@@ -5,9 +5,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  *
  * pi 自身的会话 JSONL 只记录 token 用量，没有首字/用时信息。
  * 本插件监听 assistant 消息的生命周期事件，记录：
- *   - 首Token耗时 firstTokenMs：从请求开始到收到第一个流式事件（含思考）
- *   - 首字耗时   firstTextMs  ：从请求开始到收到第一段可见文本
- *   - 总用时     durationMs   ：从请求开始到消息结束
+ *   - 首Token耗时 firstTokenMs：从请求发出到收到第一个流式事件（含思考）
+ *   - 首字耗时   firstTextMs  ：从请求发出到收到第一段可见文本
+ *   - 总用时     durationMs   ：从请求发出到消息结束
+ *
+ * 时间基准取 assistant 消息自身的 timestamp：pi 在发请求前创建消息对象
+ * 时打点，等价于请求发出时刻。不能以 message_start 回调时刻为准——该事件
+ * 要等流式 start 事件（HTTP 响应建立）才触发，会丢掉排队与首字节延迟。
  *
  * 数据通过 pi.appendEntry() 以 custom entry（customType="pi-tracker/timing"）
  * 写入当前会话文件（~/.pi/agent/sessions/--<工作目录>--/*.jsonl），
@@ -21,10 +25,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const TIMING_TYPE = "pi-tracker/timing";
 
 interface PendingTiming {
-  /** 消息自身的 timestamp（ms），与落盘消息一致，用于追踪器关联 */
+  /** 消息自身的 timestamp（ms），pi 于发请求前打点，为请求起点 */
   messageTimestamp: number;
-  /** message_start 时刻（wall clock, ms） */
-  start: number;
   /** 首次收到任何流式事件的时刻（含 thinking） */
   firstToken: number;
   /** 首次收到文本增量（text_start/text_delta）的时刻 */
@@ -34,13 +36,13 @@ interface PendingTiming {
 let pending: PendingTiming | null = null;
 
 export default function (pi: ExtensionAPI) {
-  // 新一轮请求开始：记录起点
+  // 新一轮请求开始：以消息 timestamp 为起点，其早于 message_start 回调
+  // 触发时刻，后者会漏掉排队与首字节延迟
   pi.on("message_start", (event) => {
     if (event.message.role !== "assistant") return;
     const msg = event.message as { timestamp?: number };
     pending = {
       messageTimestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
-      start: Date.now(),
       firstToken: 0,
       firstText: 0,
     };
@@ -83,17 +85,18 @@ export default function (pi: ExtensionAPI) {
       (u?.cacheWrite ?? 0) +
       (u?.reasoning ?? 0);
     const end = Date.now();
-    const firstTokenMs = pending.firstToken > 0 ? pending.firstToken - pending.start : 0;
-    const firstTextMs = pending.firstText > 0 ? pending.firstText - pending.start : 0;
-    const durationMs = end - pending.start;
+    const base = pending.messageTimestamp;
+    const firstTokenMs = pending.firstToken > 0 ? pending.firstToken - base : 0;
+    const firstTextMs = pending.firstText > 0 ? pending.firstText - base : 0;
+    const durationMs = end - base;
 
     // 与 opencode-tracker 的 pi 解析规则保持一致：零 token 消息不生成用量记录，
     // 这里也不写 timing，保证追踪器按顺序关联不会错位。
     if (tokens > 0) {
       pi.appendEntry(TIMING_TYPE, {
         v: 1,
-        messageTimestamp: pending.messageTimestamp,
-        start: pending.start,
+        messageTimestamp: base,
+        start: base,
         firstToken: pending.firstToken || 0,
         firstText: pending.firstText || 0,
         end,
