@@ -25,10 +25,15 @@ import {
 	type BashOperations,
 	createBashTool,
 	createEditTool,
+	createFindTool,
+	createGrepTool,
 	createLocalBashOperations,
+	createLsTool,
 	createReadTool,
 	createWriteTool,
 	type EditOperations,
+	type FindOperations,
+	type LsOperations,
 	type ReadOperations,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
@@ -208,8 +213,106 @@ function plinkOutput(remote: string, command: string, options: PlinkRunOptions =
 	});
 }
 
+function toRemotePath(filePath: string, localCwd: string, remoteCwd: string): string {
+	const normalizedPath = filePath.replaceAll("\\", "/");
+	const normalizedLocalCwd = localCwd.replaceAll("\\", "/").replace(/\/+$/, "");
+	const normalizedRemoteCwd = remoteCwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+	const comparablePath = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+	const comparableLocalCwd = process.platform === "win32" ? normalizedLocalCwd.toLowerCase() : normalizedLocalCwd;
+	const comparableRemoteCwd = process.platform === "win32" ? normalizedRemoteCwd.toLowerCase() : normalizedRemoteCwd;
+
+	if (comparablePath === comparableRemoteCwd || comparablePath.startsWith(`${comparableRemoteCwd}/`)) {
+		return normalizedPath;
+	}
+	if (comparablePath === comparableLocalCwd) return normalizedRemoteCwd;
+	if (comparablePath.startsWith(`${comparableLocalCwd}/`)) {
+		return `${normalizedRemoteCwd}/${normalizedPath.slice(normalizedLocalCwd.length + 1)}`;
+	}
+	if (process.platform === "win32" && /^[A-Za-z]:\//.test(normalizedPath)) {
+		return normalizedPath.slice(2) || "/";
+	}
+	throw new Error(`路径不在 SSH 工作区内: ${filePath}`);
+}
+
+function quoteRemoteArg(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function toLocalPath(remotePath: string, localCwd: string, remoteCwd: string): string {
+	const normalizedPath = remotePath.replaceAll("\\", "/");
+	const normalizedRemoteCwd = remoteCwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+	const comparablePath = normalizedPath.toLowerCase();
+	const comparableRemoteCwd = normalizedRemoteCwd.toLowerCase();
+	if (comparablePath === comparableRemoteCwd) return localCwd;
+	if (normalizedRemoteCwd === "/" && normalizedPath.startsWith("/")) {
+		return path.join(localCwd, ...normalizedPath.slice(1).split("/"));
+	}
+	if (comparablePath.startsWith(`${comparableRemoteCwd}/`)) {
+		const relative = normalizedPath.slice(normalizedRemoteCwd.length + 1);
+		return path.join(localCwd, ...relative.split("/"));
+	}
+	return remotePath;
+}
+
+async function remotePathExists(remote: string, remotePath: string): Promise<boolean> {
+	try {
+		await execShell(remote, `test -e ${quoteRemoteArg(remotePath)}`);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function createRemoteLsOps(remote: string, remoteCwd: string, localCwd: string): LsOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		exists: (p) => remotePathExists(remote, toRemote(p)),
+		stat: async (p) => {
+			const remotePath = toRemote(p);
+			if (!(await remotePathExists(remote, remotePath))) throw new Error(`Path not found: ${p}`);
+			const isDirectory = await remotePathExists(remote, `${remotePath}/.`);
+			return { isDirectory: () => isDirectory };
+		},
+		readdir: async (p) => {
+			const remotePath = toRemote(p);
+			const output = await execShell(remote, `find ${quoteRemoteArg(remotePath)} -mindepth 1 -maxdepth 1 -printf '%f\\n'`);
+			return output.toString().split(/\r?\n/).filter(Boolean);
+		},
+	};
+}
+
+function createRemoteFindOps(remote: string, remoteCwd: string, localCwd: string): FindOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		exists: (p) => remotePathExists(remote, toRemote(p)),
+		glob: async (pattern, cwd, { ignore, limit }) => {
+			const remotePath = toRemote(cwd);
+			const patternArgs = pattern.includes("/")
+				? ["-path", path.posix.join(remotePath, pattern)]
+				: ["-name", pattern];
+			const ignoreArgs = ignore.flatMap((item) => ["!", "-path", path.posix.join(remotePath, item)]);
+			const maxResults = Math.max(1, Math.floor(limit));
+			const command = [
+				"find",
+				quoteRemoteArg(remotePath),
+				"-type",
+				"f",
+				...ignoreArgs.map(quoteRemoteArg),
+				...patternArgs.map(quoteRemoteArg),
+				"-print",
+				"|",
+				"head",
+				"-n",
+				String(maxResults),
+			].join(" ");
+			const output = await execShell(remote, command);
+			return output.toString().split(/\r?\n/).filter(Boolean).map((p) => toLocalPath(p, cwd, remotePath));
+		},
+	};
+}
+
 function createRemoteReadOps(remote: string, remoteCwd: string, localCwd: string): ReadOperations {
-	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	return {
 		readFile: (p) => execShell(remote, `cat ${JSON.stringify(toRemote(p))}`),
 		access: (p) => execShell(remote, `test -r ${JSON.stringify(toRemote(p))}`).then(() => {}),
@@ -226,7 +329,7 @@ function createRemoteReadOps(remote: string, remoteCwd: string, localCwd: string
 }
 
 function createRemoteWriteOps(remote: string, remoteCwd: string, localCwd: string): WriteOperations {
-	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	return {
 		writeFile: async (p, content) => {
 			const b64 = Buffer.from(content).toString("base64");
@@ -243,7 +346,7 @@ function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string
 }
 
 function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
-	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	const sshRun = (cmd: string, options: { onData?: (d: Buffer) => void; signal?: AbortSignal; timeout?: number }) =>
 		new Promise<{ exitCode: number | null }>((resolve, reject) => {
 			const { bin, args, env } = buildSshInvocation(remote, cmd);
@@ -282,6 +385,52 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 	};
 }
 
+async function executeRemoteGrep(
+	remote: string,
+	remoteCwd: string,
+	localCwd: string,
+	params: unknown,
+	signal?: AbortSignal,
+) {
+	if (signal?.aborted) throw new Error("Operation aborted");
+	const input = params as {
+		pattern: string;
+		path?: string;
+		glob?: string;
+		ignoreCase?: boolean;
+		literal?: boolean;
+		context?: number;
+		limit?: number;
+	};
+	const searchPath = input.path ? path.resolve(localCwd, input.path) : localCwd;
+	const remotePath = toRemotePath(searchPath, localCwd, remoteCwd);
+	if (!(await remotePathExists(remote, remotePath))) throw new Error(`Path not found: ${searchPath}`);
+	const isDirectory = await remotePathExists(remote, `${remotePath}/.`);
+	const workDir = isDirectory ? remotePath : path.posix.dirname(remotePath);
+	const target = isDirectory ? "." : path.posix.basename(remotePath);
+	const args = ["rg", "--line-number", "--color=never", "--hidden", "--no-heading"];
+	if (input.ignoreCase) args.push("--ignore-case");
+	if (input.literal) args.push("--fixed-strings");
+	if (input.context && input.context > 0) args.push("-C", String(Math.floor(input.context)));
+	args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+	if (input.glob) args.push("--glob", input.glob);
+	args.push("--", input.pattern, target);
+	const command = [
+		`cd ${quoteRemoteArg(workDir)} &&`,
+		args.map(quoteRemoteArg).join(" "),
+		`; status=$?; if [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"`,
+	].join(" ");
+	const output = (await execShell(remote, command)).toString().trimEnd();
+	if (!output) return { content: [{ type: "text" as const, text: "No matches found" }], details: undefined };
+	const limit = Math.max(1, Math.floor(input.limit ?? 100));
+	const lines = output.split(/\r?\n/);
+	const limited = lines.slice(0, limit).join("\n");
+	return {
+		content: [{ type: "text" as const, text: limited }],
+		details: lines.length > limit ? { matchLimitReached: limit } : undefined,
+	};
+}
+
 // 宿主的运行时变量不应泄漏给项目命令（与 pi-web sanitize 逻辑一致）
 function sanitizeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const cleaned = { ...env };
@@ -311,6 +460,9 @@ export default function (pi: ExtensionAPI) {
 	const localRead = createReadTool(sessionCwd);
 	const localWrite = createWriteTool(sessionCwd);
 	const localEdit = createEditTool(sessionCwd);
+	const localLs = createLsTool(sessionCwd);
+	const localFind = createFindTool(sessionCwd);
+	const localGrep = createGrepTool(sessionCwd);
 	const localBashOps = createSanitizedLocalBashOps();
 	const localBash = createBashTool(sessionCwd, { operations: localBashOps });
 
@@ -318,11 +470,18 @@ export default function (pi: ExtensionAPI) {
 	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
 
 	const getSsh = () => resolvedSsh;
+	const isSshConfigured = () => Boolean(process.env.PI_WEB_SSH || typeof pi.getFlag("ssh") === "string");
+	const requireSsh = () => {
+		const ssh = getSsh();
+		if (ssh) return ssh;
+		if (isSshConfigured()) throw new Error("SSH 未连接，已拒绝本地执行");
+		return undefined;
+	};
 
 	pi.registerTool({
 		...localRead,
 		async execute(id, params, signal, onUpdate, _ctx) {
-			const ssh = getSsh();
+			const ssh = requireSsh();
 			const ops = ssh ? createRemoteReadOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createReadTool(sessionCwd, ops ? { operations: ops } : undefined);
 			return tool.execute(id, params, signal, onUpdate);
@@ -332,7 +491,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		...localWrite,
 		async execute(id, params, signal, onUpdate, _ctx) {
-			const ssh = getSsh();
+			const ssh = requireSsh();
 			const ops = ssh ? createRemoteWriteOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createWriteTool(sessionCwd, ops ? { operations: ops } : undefined);
 			return tool.execute(id, params, signal, onUpdate);
@@ -342,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		...localEdit,
 		async execute(id, params, signal, onUpdate, _ctx) {
-			const ssh = getSsh();
+			const ssh = requireSsh();
 			const ops = ssh ? createRemoteEditOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createEditTool(sessionCwd, ops ? { operations: ops } : undefined);
 			return tool.execute(id, params, signal, onUpdate);
@@ -350,9 +509,38 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		...localLs,
+		async execute(id, params, signal, onUpdate, _ctx) {
+			const ssh = requireSsh();
+			if (!ssh) return localLs.execute(id, params, signal, onUpdate);
+			const tool = createLsTool(sessionCwd, { operations: createRemoteLsOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
+			return tool.execute(id, params, signal, onUpdate);
+		},
+	});
+
+	pi.registerTool({
+		...localFind,
+		async execute(id, params, signal, onUpdate, _ctx) {
+			const ssh = requireSsh();
+			if (!ssh) return localFind.execute(id, params, signal, onUpdate);
+			const tool = createFindTool(sessionCwd, { operations: createRemoteFindOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
+			return tool.execute(id, params, signal, onUpdate);
+		},
+	});
+
+	pi.registerTool({
+		...localGrep,
+		async execute(_id, params, signal) {
+			const ssh = requireSsh();
+			if (!ssh) return localGrep.execute(_id, params, signal);
+			return executeRemoteGrep(ssh.remote, ssh.remoteCwd, sessionCwd, params, signal);
+		},
+	});
+
+	pi.registerTool({
 		...localBash,
 		async execute(id, params, signal, onUpdate, _ctx) {
-			const ssh = getSsh();
+			const ssh = requireSsh();
 			const ops = ssh ? createRemoteBashOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createBashTool(sessionCwd, ops ? { operations: ops } : undefined);
 			return tool.execute(id, params, signal, onUpdate);
@@ -388,17 +576,16 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
 				console.log(`[pi-web] SSH connected: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`);
 			} catch (error) {
-				// 远端不可达时显式提示回退，避免静默写本地
 				const detail = error instanceof Error ? error.message : String(error);
 				console.error(`[pi-web] SSH failed: ${detail}`);
-				ctx.ui.notify(`SSH 连接失败（${detail}），回退本地执行`, "warning");
+				ctx.ui.notify(`SSH 连接失败（${detail}），已拒绝本地执行`, "error");
 			}
 		}
 	});
 
 	// user_bash 旁路同样清洗本地环境，SSH 时仍走远程
 	pi.on("user_bash", (_event) => {
-		const ssh = getSsh();
+		const ssh = requireSsh();
 		if (!ssh) return { operations: localBashOps };
 		return { operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, sessionCwd) };
 	});
