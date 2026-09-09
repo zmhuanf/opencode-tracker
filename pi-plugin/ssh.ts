@@ -255,12 +255,21 @@ function toLocalPath(remotePath: string, localCwd: string, remoteCwd: string): s
 }
 
 async function remotePathExists(remote: string, remotePath: string): Promise<boolean> {
-	try {
-		await execShell(remote, `test -e ${quoteRemoteArg(remotePath)}`);
-		return true;
-	} catch {
-		return false;
-	}
+	const output = await execShell(
+		remote,
+		`if test -e ${quoteRemoteArg(remotePath)}; then printf 1; else printf 0; fi`,
+	);
+	return output.toString().trim() === "1";
+}
+
+async function resolveRemoteGrepTool(remote: string): Promise<"rg" | "grep"> {
+	const output = await execShell(
+		remote,
+		"if command -v rg >/dev/null 2>&1; then printf rg; elif command -v grep >/dev/null 2>&1; then printf grep; else printf none; fi",
+	);
+	const tool = output.toString().trim();
+	if (tool === "rg" || tool === "grep") return tool;
+	throw new Error("远程未找到 rg 或 grep");
 }
 
 function createRemoteLsOps(remote: string, remoteCwd: string, localCwd: string): LsOperations {
@@ -408,13 +417,20 @@ async function executeRemoteGrep(
 	const isDirectory = await remotePathExists(remote, `${remotePath}/.`);
 	const workDir = isDirectory ? remotePath : path.posix.dirname(remotePath);
 	const target = isDirectory ? "." : path.posix.basename(remotePath);
-	const args = ["rg", "--line-number", "--color=never", "--hidden", "--no-heading"];
-	if (input.ignoreCase) args.push("--ignore-case");
-	if (input.literal) args.push("--fixed-strings");
+	const tool = await resolveRemoteGrepTool(remote);
+	const args = tool === "rg"
+		? ["rg", "--line-number", "--color=never", "--hidden", "--no-heading"]
+		: ["grep", "-r", "-n", "-H", "-I", "--exclude-dir", "node_modules", "--exclude-dir", ".git"];
+	if (input.ignoreCase) args.push(tool === "rg" ? "--ignore-case" : "-i");
+	if (input.literal) args.push(tool === "rg" ? "--fixed-strings" : "-F");
 	if (input.context && input.context > 0) args.push("-C", String(Math.floor(input.context)));
-	args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
-	if (input.glob) args.push("--glob", input.glob);
-	args.push("--", input.pattern, target);
+	if (tool === "rg") {
+		args.push("--glob", "!**/node_modules/**", "--glob", "!**/.git/**");
+		if (input.glob) args.push("--glob", input.glob);
+	} else if (input.glob) {
+		args.push("--include", input.glob);
+	}
+	args.push(tool === "rg" ? "--" : "-e", input.pattern, target);
 	const command = [
 		`cd ${quoteRemoteArg(workDir)} &&`,
 		args.map(quoteRemoteArg).join(" "),
