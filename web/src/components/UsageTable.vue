@@ -43,7 +43,7 @@ const columns: DataTableColumns<UsageRecord> = [
   {
     title: '模型',
     key: 'model',
-    width: 220,
+    width: 300,
     render: (r) => h(NButton, { text: true, type: 'primary', onClick: () => emit('editPricing', r.provider, r.model) }, () => r.model),
   },
   {
@@ -106,21 +106,21 @@ const columns: DataTableColumns<UsageRecord> = [
     title: '思考',
     key: 'reasoningTokens',
     align: 'right',
-    width: 110,
+    width: 80,
     render: (r) => r.reasoningTokens.toLocaleString(),
   },
   {
     title: '缓存写入',
     key: 'cacheWriteTokens',
     align: 'right',
-    width: 110,
+    width: 90,
     render: (r) => r.cacheWriteTokens.toLocaleString(),
   },
   {
     title: '费用',
     key: 'cost',
     align: 'right',
-    width: 100,
+    width: 80,
     render: (r) => (r.cost > 0 ? `¥${r.cost.toFixed(3)}` : '-'),
   },
 ];
