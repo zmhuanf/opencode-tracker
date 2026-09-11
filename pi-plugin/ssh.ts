@@ -13,10 +13,11 @@
  *
  * Requirements:
  *   - key 认证走原生 ssh；密码认证需 plink（scoop install putty）
+ *   - 密码认证经常驻 plink -share 连接复用，避免每次命令重新握手
  *   - bash on remote
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -41,6 +42,11 @@ import {
 // 冒号后纯数字视为端口（如 host:2222），跨会话可被 buildSshInvocation 读取
 let sshPort: string | undefined;
 
+export interface SshTarget {
+	remote: string;
+	remoteCwd: string;
+	remoteHome: string;
+}
 // sshpass/askpass 在本机均无法喂密码（详见排查），密码认证改用 plink -pw
 // 首次连接自动提取指纹并缓存，plink -hostkey 可免交互信任
 const HOSTKEY_STORE = path.join(os.tmpdir(), "pi-web-ssh-hostkeys.json");
@@ -90,7 +96,9 @@ function execShell(remote: string, command: string): Promise<Buffer> {
 	}
 	return plinkOutput(remote, command).then((r) => {
 		if (r.code !== 0) {
-			throw new Error(`SSH failed (${r.code}): ${r.stderr}`);
+			const stderr = r.stderr.trim();
+			// plink 失败时原因可能在 stdout，两者都带上才能定位
+			throw new Error(`SSH failed (${r.code}): ${stderr || r.stdout.toString().trim()}`);
 		}
 		return r.stdout;
 	});
@@ -107,7 +115,10 @@ function sshOutput(remote: string, command: string): Promise<Buffer> {
 		child.on("error", reject);
 		child.on("close", (code) => {
 			if (code !== 0) {
-				reject(new Error(`SSH failed (${code}): ${Buffer.concat(errChunks).toString()}`));
+				const stderr = Buffer.concat(errChunks).toString().trim();
+				// ssh 的部分失败原因只出现在 stdout，两者都带上才能定位
+				const stdout = Buffer.concat(chunks).toString().trim();
+				reject(new Error(`SSH failed (${code}): ${stderr || stdout}`));
 			} else {
 				resolve(Buffer.concat(chunks));
 			}
@@ -157,6 +168,52 @@ function resolvePlink(): string | undefined {
 	return undefined;
 }
 
+// 密码认证无法用原生 ssh 的 ControlMaster，改用 plink -share 复用已认证连接
+const UPSTREAM_IDLE_MS = 10 * 60 * 1000;
+let upstream: { remote: string; child: ChildProcess } | null = null;
+let upstreamIdleTimer: NodeJS.Timeout | undefined;
+
+// 常驻上游：上游自身必须带 -share，否则后续连接无法复用
+function startUpstream(remote: string): void {
+	const bin = resolvePlink();
+	const fingerprint = storedHostKey(remote);
+	if (!bin || !fingerprint) return;
+	const args = ["-share", "-ssh", "-batch"];
+	if (sshPort) args.push("-P", sshPort);
+	args.push("-pw", process.env.PI_WEB_SSH_PASSWORD ?? "", "-hostkey", fingerprint, remote, "cat");
+	// stdin 保持打开且不 end，远端 cat 阻塞即保持连接；Node 退出时管道关闭自动收盘
+	const child = spawn(bin, args, { stdio: ["pipe", "ignore", "ignore"] });
+	child.unref();
+	child.on("exit", () => {
+		if (upstream?.child === child) upstream = null;
+	});
+	child.on("error", () => {
+		if (upstream?.child === child) upstream = null;
+	});
+	upstream = { remote, child };
+}
+
+function stopUpstream(): void {
+	if (upstreamIdleTimer) {
+		clearTimeout(upstreamIdleTimer);
+		upstreamIdleTimer = undefined;
+	}
+	const child = upstream?.child;
+	upstream = null;
+	child?.kill();
+}
+
+// 确保上游存在并刷新空闲计时；无上游时 -share 自动回退为新建连接，不影响正确性
+function touchUpstream(remote: string): void {
+	if (!upstream || upstream.remote !== remote || upstream.child.exitCode !== null || upstream.child.killed) {
+		stopUpstream();
+		startUpstream(remote);
+	}
+	if (upstreamIdleTimer) clearTimeout(upstreamIdleTimer);
+	upstreamIdleTimer = setTimeout(stopUpstream, UPSTREAM_IDLE_MS);
+	upstreamIdleTimer.unref();
+}
+
 // 单次 spawn plink；指纹缺失时首次连接会因 hostkey 未缓存而失败
 function spawnPlink(remote: string, command: string, options: PlinkRunOptions, fingerprint: string | undefined): Promise<PlinkResult> {
 	return new Promise((resolve, reject) => {
@@ -165,7 +222,8 @@ function spawnPlink(remote: string, command: string, options: PlinkRunOptions, f
 			reject(new Error("未找到 plink：请 winget install PuTTY.PuTTY 或 scoop install putty，或下载 plink.exe 放入 PATH"));
 			return;
 		}
-		const args = ["-ssh", "-batch"];
+		touchUpstream(remote);
+		const args = ["-share", "-ssh", "-batch"];
 		if (sshPort) args.push("-P", sshPort);
 		args.push("-pw", process.env.PI_WEB_SSH_PASSWORD ?? "");
 		if (fingerprint) args.push("-hostkey", fingerprint);
@@ -209,49 +267,143 @@ function plinkOutput(remote: string, command: string, options: PlinkRunOptions =
 		const fingerprint = extractFingerprint(result.stderr);
 		if (!fingerprint) return result;
 		saveHostKey(remote, fingerprint);
+		// 提前建立常驻连接，本次后续调用即可复用
+		startUpstream(remote);
 		return spawnPlink(remote, command, options, fingerprint);
 	});
 }
 
-function toRemotePath(filePath: string, localCwd: string, remoteCwd: string): string {
-	const normalizedPath = filePath.replaceAll("\\", "/");
-	const normalizedLocalCwd = localCwd.replaceAll("\\", "/").replace(/\/+$/, "");
-	const normalizedRemoteCwd = remoteCwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
-	const comparablePath = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
-	const comparableLocalCwd = process.platform === "win32" ? normalizedLocalCwd.toLowerCase() : normalizedLocalCwd;
-	const comparableRemoteCwd = process.platform === "win32" ? normalizedRemoteCwd.toLowerCase() : normalizedRemoteCwd;
+// Windows 路径大小写不敏感，比较时统一折叠
+function foldCase(value: string): string {
+	return process.platform === "win32" ? value.toLowerCase() : value;
+}
 
-	if (comparablePath === comparableRemoteCwd || comparablePath.startsWith(`${comparableRemoteCwd}/`)) {
-		return normalizedPath;
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** glob 转 GNU find 扩展正则：** 跨层，* ? 仅限单层；find 的 -regex 匹配从搜索根开始的完整路径 */
+function globToFindRegex(glob: string, searchRoot: string): string {
+	const segments = glob.replaceAll("\\", "/").split("/").filter((segment) => segment !== "" && segment !== ".");
+	const body = segments
+		.map((segment, index) => {
+			if (segment === "**") return index === segments.length - 1 ? ".*" : "(.*/)?";
+			const literal = segment.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", "[^/]*").replaceAll("?", "[^/]");
+			return `${literal}/`;
+		})
+		.join("");
+	const root = searchRoot.replaceAll("\\", "/").replace(/\/+$/, "");
+	const prefix = root === "" ? "/" : `${escapeRegExp(root)}/`;
+	return `^${prefix}${body.replace(/\/$/, "")}$`;
+}
+
+/** 文案里的本地镜像路径还原为远程路径，命名空间外的本地路径保持原样 */
+function restoreRemoteText(text: string, localCwd: string, ssh: SshTarget): string {
+	const absolute = new RegExp(`${escapeRegExp(localCwd)}[^\\s"'\`()]*`, "gi");
+	// 工具回显的可能是不带本地前缀的镜像相对路径
+	const relative = new RegExp(`(?:${escapeRegExp(SSH_NAMESPACE)}/[^\\s"'\`()]*)`, "g");
+	return text
+		.replace(absolute, (match) => {
+			try {
+				return toRemotePath(match, localCwd, ssh.remoteCwd);
+			} catch {
+				return match;
+			}
+		})
+		.replace(relative, (match) => `/${match.slice(SSH_NAMESPACE.length + 1)}`);
+}
+
+/** SSH 模式下统一还原返回内容与错误信息中的路径显示 */
+async function withRemotePaths<T>(localCwd: string, ssh: SshTarget, run: () => Promise<T>): Promise<T> {
+	try {
+		const result = (await run()) as {
+			content?: { type: string; text?: string }[];
+			details?: { diff?: string; patch?: string };
+		};
+		for (const block of result?.content ?? []) {
+			if (block.type === "text" && block.text) block.text = restoreRemoteText(block.text, localCwd, ssh);
+		}
+		if (result?.details?.diff) result.details.diff = restoreRemoteText(result.details.diff, localCwd, ssh);
+		if (result?.details?.patch) result.details.patch = restoreRemoteText(result.details.patch, localCwd, ssh);
+		return result as T;
+	} catch (error) {
+		throw new Error(restoreRemoteText(error instanceof Error ? error.message : String(error), localCwd, ssh));
 	}
-	if (comparablePath === comparableLocalCwd) return normalizedRemoteCwd;
-	if (comparablePath.startsWith(`${comparableLocalCwd}/`)) {
-		return `${normalizedRemoteCwd}/${normalizedPath.slice(normalizedLocalCwd.length + 1)}`;
+}
+
+// 目标相对工作区的片段，null 表示落在工作区外
+function relativeWithin(target: string, root: string): string | null {
+	const normalizedTarget = target.replaceAll("\\", "/");
+	const normalizedRoot = root.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
+	if (normalizedRoot === "/") return foldCase(normalizedTarget) === "/" ? "" : normalizedTarget.replace(/^\/+/, "");
+	if (foldCase(normalizedTarget) === foldCase(normalizedRoot)) return "";
+	if (foldCase(normalizedTarget).startsWith(`${foldCase(normalizedRoot)}/`)) {
+		return normalizedTarget.slice(normalizedRoot.length + 1);
 	}
-	if (process.platform === "win32" && /^[A-Za-z]:\//.test(normalizedPath)) {
-		return normalizedPath.slice(2) || "/";
-	}
-	throw new Error(`路径不在 SSH 工作区内: ${filePath}`);
+	return null;
+}
+
+// 远程根命名空间：镜像路径仅在本地下虚拟存在，从不写盘
+const SSH_NAMESPACE = ".__pi_ssh__";
+
+function stripTrailingSlash(value: string): string {
+	return value.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+function mirrorRoot(localCwd: string): string {
+	return path.join(localCwd, SSH_NAMESPACE);
+}
+
+/** 远程绝对路径换算为本地镜像绝对路径，远程 / 对应命名空间根 */
+export function remoteToMirror(remotePath: string, localCwd: string): string {
+	const relative = remotePath.replaceAll("\\", "/").replace(/^\/+/, "");
+	return relative === "" ? mirrorRoot(localCwd) : path.join(mirrorRoot(localCwd), ...relative.split("/"));
+}
+
+// SDK 解析后的镜像本地路径还原为远程绝对路径
+function toRemotePath(filePath: string, localCwd: string, remoteCwd: string): string {
+	// 会话 cwd 自身代表远程工作目录
+	if (foldCase(stripTrailingSlash(filePath)) === foldCase(stripTrailingSlash(localCwd))) return remoteCwd;
+	const relative = relativeWithin(filePath, mirrorRoot(localCwd));
+	if (relative === null) throw new Error(`路径不在 SSH 命名空间内: ${filePath}`);
+	return relative === "" ? "/" : `/${relative}`;
 }
 
 function quoteRemoteArg(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function toLocalPath(remotePath: string, localCwd: string, remoteCwd: string): string {
-	const normalizedPath = remotePath.replaceAll("\\", "/");
-	const normalizedRemoteCwd = remoteCwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
-	const comparablePath = normalizedPath.toLowerCase();
-	const comparableRemoteCwd = normalizedRemoteCwd.toLowerCase();
-	if (comparablePath === comparableRemoteCwd) return localCwd;
-	if (normalizedRemoteCwd === "/" && normalizedPath.startsWith("/")) {
-		return path.join(localCwd, ...normalizedPath.slice(1).split("/"));
+/** 模型给出的路径按远程语义解析为远程绝对路径，远程文件系统内任意路径均可访问 */
+export function resolveRemotePath(input: string, localCwd: string, ssh: SshTarget): string {
+	const normalized = input.replaceAll("\\", "/");
+	// SDK 回传的镜像形式还原为远程路径
+	const mirrored = relativeWithin(normalized, mirrorRoot(localCwd));
+	if (mirrored !== null) return mirrored === "" ? "/" : `/${mirrored}`;
+	if (process.platform === "win32" && /^[A-Za-z]:\//.test(normalized)) {
+		throw new Error(`${input} 不是远程路径；远程可访问任意绝对路径（如 /etc/hosts）`);
 	}
-	if (comparablePath.startsWith(`${comparableRemoteCwd}/`)) {
-		const relative = normalizedPath.slice(normalizedRemoteCwd.length + 1);
-		return path.join(localCwd, ...relative.split("/"));
-	}
-	return remotePath;
+	if (normalized === "~") return ssh.remoteHome;
+	if (normalized.startsWith("~/")) return path.posix.normalize(path.posix.join(ssh.remoteHome, normalized.slice(2)));
+	if (normalized.startsWith("/")) return path.posix.normalize(normalized);
+	return path.posix.normalize(path.posix.join(ssh.remoteCwd, normalized));
+}
+
+/** 模型路径折算为 sessionCwd 下的相对镜像路径，交给 SDK 工具自己的路径解析 */
+export function toMirrorPath(input: string, localCwd: string, ssh: SshTarget): string {
+	const mirror = remoteToMirror(resolveRemotePath(input, localCwd, ssh), localCwd);
+	const relative = path.relative(localCwd, mirror);
+	return relative === "" ? "." : relative.split(path.sep).join("/");
+}
+
+// 一次连接取回远端 cwd 与 $HOME，用于路径镜像
+async function probeRemotePaths(remote: string): Promise<{ cwd: string; home: string }> {
+	const lines = (await execShell(remote, `pwd; printf '%s\n' "$HOME"`))
+		.toString()
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const cwd = lines[0] ?? "/";
+	return { cwd, home: lines[1] ?? cwd };
 }
 
 async function remotePathExists(remote: string, remotePath: string): Promise<boolean> {
@@ -296,18 +448,21 @@ function createRemoteFindOps(remote: string, remoteCwd: string, localCwd: string
 		exists: (p) => remotePathExists(remote, toRemote(p)),
 		glob: async (pattern, cwd, { ignore, limit }) => {
 			const remotePath = toRemote(cwd);
-			const patternArgs = pattern.includes("/")
-				? ["-path", path.posix.join(remotePath, pattern)]
-				: ["-name", pattern];
-			const ignoreArgs = ignore.flatMap((item) => ["!", "-path", path.posix.join(remotePath, item)]);
 			const maxResults = Math.max(1, Math.floor(limit));
+			// GNU find 的 -path 不支持 ** 跨层，改用扩展正则精确表达 glob
+			const regexArgs = [
+				...ignore.flatMap((item) => ["!", "-regex", globToFindRegex(item, remotePath)]),
+				"-regex",
+				globToFindRegex(pattern, remotePath),
+			];
 			const command = [
 				"find",
 				quoteRemoteArg(remotePath),
+				"-regextype",
+				"posix-extended",
 				"-type",
 				"f",
-				...ignoreArgs.map(quoteRemoteArg),
-				...patternArgs.map(quoteRemoteArg),
+				...regexArgs.map(quoteRemoteArg),
 				"-print",
 				"|",
 				"head",
@@ -315,7 +470,7 @@ function createRemoteFindOps(remote: string, remoteCwd: string, localCwd: string
 				String(maxResults),
 			].join(" ");
 			const output = await execShell(remote, command);
-			return output.toString().split(/\r?\n/).filter(Boolean).map((p) => toLocalPath(p, cwd, remotePath));
+			return output.toString().split(/\r?\n/).filter(Boolean).map((p) => remoteToMirror(p, localCwd));
 		},
 	};
 }
@@ -323,8 +478,15 @@ function createRemoteFindOps(remote: string, remoteCwd: string, localCwd: string
 function createRemoteReadOps(remote: string, remoteCwd: string, localCwd: string): ReadOperations {
 	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	return {
-		readFile: (p) => execShell(remote, `cat ${JSON.stringify(toRemote(p))}`),
-		access: (p) => execShell(remote, `test -r ${JSON.stringify(toRemote(p))}`).then(() => {}),
+		readFile: (p) => execShell(remote, `cat ${quoteRemoteArg(toRemote(p))}`),
+		access: async (p) => {
+			const remotePath = toRemote(p);
+			const output = await execShell(
+				remote,
+				`if test -r ${quoteRemoteArg(remotePath)}; then printf 1; else printf 0; fi`,
+			);
+			if (output.toString().trim() !== "1") throw new Error(`Path not readable: ${remotePath}`);
+		},
 		detectImageMimeType: async (p) => {
 			try {
 				const r = await execShell(remote, `file --mime-type -b ${JSON.stringify(toRemote(p))}`);
@@ -395,8 +557,7 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 }
 
 async function executeRemoteGrep(
-	remote: string,
-	remoteCwd: string,
+	ssh: SshTarget,
 	localCwd: string,
 	params: unknown,
 	signal?: AbortSignal,
@@ -411,13 +572,12 @@ async function executeRemoteGrep(
 		context?: number;
 		limit?: number;
 	};
-	const searchPath = input.path ? path.resolve(localCwd, input.path) : localCwd;
-	const remotePath = toRemotePath(searchPath, localCwd, remoteCwd);
-	if (!(await remotePathExists(remote, remotePath))) throw new Error(`Path not found: ${searchPath}`);
-	const isDirectory = await remotePathExists(remote, `${remotePath}/.`);
+	const remotePath = input.path ? resolveRemotePath(input.path, localCwd, ssh) : ssh.remoteCwd;
+	if (!(await remotePathExists(ssh.remote, remotePath))) throw new Error(`Path not found: ${input.path ?? remotePath}`);
+	const isDirectory = await remotePathExists(ssh.remote, `${remotePath}/.`);
 	const workDir = isDirectory ? remotePath : path.posix.dirname(remotePath);
 	const target = isDirectory ? "." : path.posix.basename(remotePath);
-	const tool = await resolveRemoteGrepTool(remote);
+	const tool = await resolveRemoteGrepTool(ssh.remote);
 	const args = tool === "rg"
 		? ["rg", "--line-number", "--color=never", "--hidden", "--no-heading"]
 		: ["grep", "-r", "-n", "-H", "-I", "--exclude-dir", "node_modules", "--exclude-dir", ".git"];
@@ -436,10 +596,11 @@ async function executeRemoteGrep(
 		args.map(quoteRemoteArg).join(" "),
 		`; status=$?; if [ "$status" -eq 1 ]; then exit 0; fi; exit "$status"`,
 	].join(" ");
-	const output = (await execShell(remote, command)).toString().trimEnd();
+	const output = (await execShell(ssh.remote, command)).toString().trimEnd();
 	if (!output) return { content: [{ type: "text" as const, text: "No matches found" }], details: undefined };
 	const limit = Math.max(1, Math.floor(input.limit ?? 100));
-	const lines = output.split(/\r?\n/);
+	// grep -r 输出带 ./ 前缀，去掉以对齐本地 pi 的显示
+	const lines = output.split(/\r?\n/).map((line) => line.replace(/^\.\//, ""));
 	const limited = lines.slice(0, limit).join("\n");
 	return {
 		content: [{ type: "text" as const, text: limited }],
@@ -483,7 +644,7 @@ export default function (pi: ExtensionAPI) {
 	const localBash = createBashTool(sessionCwd, { operations: localBashOps });
 
 	// Resolved lazily on session_start (CLI flags not available during factory)
-	let resolvedSsh: { remote: string; remoteCwd: string } | null = null;
+	let resolvedSsh: SshTarget | null = null;
 
 	const getSsh = () => resolvedSsh;
 	const isSshConfigured = () => Boolean(process.env.PI_WEB_SSH || typeof pi.getFlag("ssh") === "string");
@@ -500,7 +661,9 @@ export default function (pi: ExtensionAPI) {
 			const ssh = requireSsh();
 			const ops = ssh ? createRemoteReadOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createReadTool(sessionCwd, ops ? { operations: ops } : undefined);
-			return tool.execute(id, params, signal, onUpdate);
+			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
+			if (!ssh) return tool.execute(id, input, signal, onUpdate);
+			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
 	});
 
@@ -510,7 +673,9 @@ export default function (pi: ExtensionAPI) {
 			const ssh = requireSsh();
 			const ops = ssh ? createRemoteWriteOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createWriteTool(sessionCwd, ops ? { operations: ops } : undefined);
-			return tool.execute(id, params, signal, onUpdate);
+			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
+			if (!ssh) return tool.execute(id, input, signal, onUpdate);
+			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
 	});
 
@@ -520,7 +685,9 @@ export default function (pi: ExtensionAPI) {
 			const ssh = requireSsh();
 			const ops = ssh ? createRemoteEditOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createEditTool(sessionCwd, ops ? { operations: ops } : undefined);
-			return tool.execute(id, params, signal, onUpdate);
+			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
+			if (!ssh) return tool.execute(id, input, signal, onUpdate);
+			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
 	});
 
@@ -530,7 +697,8 @@ export default function (pi: ExtensionAPI) {
 			const ssh = requireSsh();
 			if (!ssh) return localLs.execute(id, params, signal, onUpdate);
 			const tool = createLsTool(sessionCwd, { operations: createRemoteLsOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
-			return tool.execute(id, params, signal, onUpdate);
+			const input = params.path ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
+			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
 	});
 
@@ -540,7 +708,8 @@ export default function (pi: ExtensionAPI) {
 			const ssh = requireSsh();
 			if (!ssh) return localFind.execute(id, params, signal, onUpdate);
 			const tool = createFindTool(sessionCwd, { operations: createRemoteFindOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
-			return tool.execute(id, params, signal, onUpdate);
+			const input = params.path ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
+			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
 	});
 
@@ -549,7 +718,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			const ssh = requireSsh();
 			if (!ssh) return localGrep.execute(_id, params, signal);
-			return executeRemoteGrep(ssh.remote, ssh.remoteCwd, sessionCwd, params, signal);
+			return withRemotePaths(sessionCwd, ssh, () => executeRemoteGrep(ssh, sessionCwd, params, signal));
 		},
 	});
 
@@ -573,21 +742,16 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const sep = arg.indexOf(":");
 				const suffix = sep >= 0 ? arg.slice(sep + 1) : "";
-				if (sep >= 0 && !suffix.startsWith("/") && /^\d+$/.test(suffix)) {
-					// 冒号后纯数字为端口（如 host:2222），cwd 由远端 pwd 解析
-					sshPort = suffix;
-					const remote = arg.slice(0, sep);
-					const pwd = (await execShell(remote, "pwd")).toString().trim();
-					resolvedSsh = { remote, remoteCwd: pwd };
-				} else if (sep >= 0) {
-					// 冒号后视为远程路径（如 host:/remote/path）
-					resolvedSsh = { remote: arg.slice(0, sep), remoteCwd: suffix };
-				} else {
-					// 无路径无端口，cwd 由远端 pwd 解析
-					const remote = arg;
-					const pwd = (await execShell(remote, "pwd")).toString().trim();
-					resolvedSsh = { remote, remoteCwd: pwd };
-				}
+				// 冒号后纯数字视为端口（host:2222），其余视为远程路径（host:/remote/path）
+				const portOnly = sep >= 0 && /^\d+$/.test(suffix);
+				const remote = sep >= 0 ? arg.slice(0, sep) : arg;
+				if (portOnly) sshPort = suffix;
+				const probe = await probeRemotePaths(remote);
+				resolvedSsh = {
+					remote,
+					remoteCwd: (portOnly || sep < 0 ? probe.cwd : suffix).replace(/\/+$/, "") || "/",
+					remoteHome: probe.home,
+				};
 				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
 				ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
 				console.log(`[pi-web] SSH connected: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`);
@@ -597,6 +761,11 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`SSH 连接失败（${detail}），已拒绝本地执行`, "error");
 			}
 		}
+	});
+
+	// 会话销毁时释放常驻连接
+	pi.on("session_shutdown", () => {
+		stopUpstream();
 	});
 
 	// user_bash 旁路同样清洗本地环境，SSH 时仍走远程
