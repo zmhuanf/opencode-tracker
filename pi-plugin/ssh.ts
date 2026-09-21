@@ -779,8 +779,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
 		const ssh = getSsh();
 		if (ssh) {
+			// SDK 拼提示词时把 cwd 反斜杠统一转成斜杠，比对前先归一
+			const promptCwd = sessionCwd.replaceAll("\\", "/");
 			const modified = event.systemPrompt.replace(
-				`Current working directory: ${sessionCwd}`,
+				`Current working directory: ${promptCwd}`,
 				`Current working directory: ${ssh.remoteCwd} (via SSH: ${ssh.remote})`,
 			);
 			return { systemPrompt: modified };
