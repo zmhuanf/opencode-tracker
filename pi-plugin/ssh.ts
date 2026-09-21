@@ -89,12 +89,12 @@ function buildSshInvocation(remote: string, command: string): { bin: string; arg
 }
 
 // 无密码时走原生 ssh（key 认证），有密码时走 plink -pw
-function execShell(remote: string, command: string): Promise<Buffer> {
+function execShell(remote: string, command: string, input?: Buffer): Promise<Buffer> {
 	const pass = process.env.PI_WEB_SSH_PASSWORD;
 	if (!pass) {
-		return sshOutput(remote, command);
+		return sshOutput(remote, command, input);
 	}
-	return plinkOutput(remote, command).then((r) => {
+	return plinkOutput(remote, command, input ? { input } : {}).then((r) => {
 		if (r.code !== 0) {
 			const stderr = r.stderr.trim();
 			// plink 失败时原因可能在 stdout，两者都带上才能定位
@@ -104,10 +104,16 @@ function execShell(remote: string, command: string): Promise<Buffer> {
 	});
 }
 
-function sshOutput(remote: string, command: string): Promise<Buffer> {
+function sshOutput(remote: string, command: string, input?: Buffer): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const { bin, args, env } = buildSshInvocation(remote, command);
-		const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env });
+		// 内容走 stdin：大文件当命令行参数会撑爆 Windows 上限（spawn ENAMETOOLONG）
+		const child = spawn(bin, args, { stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], env });
+		if (input) {
+			// ssh 提前退出时写 stdin 会抛 EPIPE，吞掉即可由 close 分支报错
+			child.stdin.on("error", () => {});
+			child.stdin.end(input);
+		}
 		const chunks: Buffer[] = [];
 		const errChunks: Buffer[] = [];
 		child.stdout.on("data", (data) => chunks.push(data));
@@ -130,6 +136,8 @@ interface PlinkRunOptions {
 	onData?: (chunk: Buffer) => void;
 	signal?: AbortSignal;
 	timeout?: number;
+	/** 写入远端命令 stdin 的内容 */
+	input?: Buffer;
 }
 
 interface PlinkResult {
@@ -228,7 +236,12 @@ function spawnPlink(remote: string, command: string, options: PlinkRunOptions, f
 		args.push("-pw", process.env.PI_WEB_SSH_PASSWORD ?? "");
 		if (fingerprint) args.push("-hostkey", fingerprint);
 		args.push(remote, command);
-		const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(bin, args, { stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"] });
+		if (options.input) {
+			// plink 提前退出时写 stdin 会抛 EPIPE，吞掉即可由 close 分支报错
+			child.stdin.on("error", () => {});
+			child.stdin.end(options.input);
+		}
 		const chunks: Buffer[] = [];
 		const errChunks: Buffer[] = [];
 		let timedOut = false;
@@ -503,8 +516,7 @@ function createRemoteWriteOps(remote: string, remoteCwd: string, localCwd: strin
 	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	return {
 		writeFile: async (p, content) => {
-			const b64 = Buffer.from(content).toString("base64");
-			await execShell(remote, `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(toRemote(p))}`);
+			await execShell(remote, `cat > ${quoteRemoteArg(toRemote(p))}`, Buffer.from(content));
 		},
 		mkdir: (dir) => execShell(remote, `mkdir -p ${JSON.stringify(toRemote(dir))}`).then(() => {}),
 	};
