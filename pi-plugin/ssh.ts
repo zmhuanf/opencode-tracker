@@ -803,17 +803,10 @@ export default function (pi: ExtensionAPI) {
 		return { operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, sessionCwd) };
 	});
 
-	// Replace local cwd with remote cwd in system prompt
-	pi.on("before_agent_start", async (event) => {
+	// 用远端路径覆盖提示词 cwd 段（pi >= 0.86 把它独立成 <cwd> 段，不再是一行文本）
+	pi.on("before_agent_start", (event) => {
 		const ssh = getSsh();
-		if (ssh) {
-			// SDK 拼提示词时把 cwd 反斜杠统一转成斜杠，比对前先归一
-			const promptCwd = sessionCwd.replaceAll("\\", "/");
-			const modified = event.systemPrompt.replace(
-				`Current working directory: ${promptCwd}`,
-				`Current working directory: ${ssh.remoteCwd} (via SSH: ${ssh.remote})`,
-			);
-			return { systemPrompt: modified };
-		}
+		// SDK 每轮从 base options 重建该字段，故必须每轮重设
+		if (ssh) event.systemPromptOptions.cwd = ssh.remoteCwd;
 	});
 }
