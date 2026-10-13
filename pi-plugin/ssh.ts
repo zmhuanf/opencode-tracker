@@ -10,11 +10,14 @@
  *   pi -e ./ssh.ts --ssh user@host:2222   (非默认 SSH 端口)
  *   npm run start -- --ssh user@host[:/remote/path|:<port>]  (pi-web 注入 PI_WEB_SSH)
  *   npm run start -- --ssh user@host:/path --pass xxx  (密码经 plink -pw)
+ *   npm run start -- --ssh user@host --ps   (远端是 Windows，整套远端操作走 PowerShell)
+ *   npm run start -- --ssh user@host --bash (显式指定 bash，等于默认；注入 PI_WEB_SSH_SHELL)
  *
  * Requirements:
  *   - key 认证走原生 ssh；密码认证需 plink（scoop install putty）
  *   - 密码认证经常驻 plink -share 连接复用，避免每次命令重新握手
- *   - bash on remote
+ *   - bash 模式要求远端有 bash 与 coreutils（rg/grep/find/cat）
+ *   - PowerShell 模式（--ps）要求远端有 Windows PowerShell 5.1，文件读写走 base64 直传字节
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -30,6 +33,7 @@ import {
 	createGrepTool,
 	createLocalBashOperations,
 	createLsTool,
+	createPowerShellTool,
 	createReadTool,
 	createWriteTool,
 	type EditOperations,
@@ -41,6 +45,44 @@ import {
 
 // 冒号后纯数字视为端口（如 host:2222），跨会话可被 buildSshInvocation 读取
 let sshPort: string | undefined;
+
+// 远端执行方式：--ps 的远端是 Windows，PowerShell 是它唯一可用的 shell
+type RemoteShell = "bash" | "powershell";
+let remoteShell: RemoteShell = "bash";
+
+function isPowerShellRemote(): boolean {
+	return remoteShell === "powershell";
+}
+
+// PowerShell 脚本统一前缀：UTF-8 输出，抑制进度流（进度会以 CLIXML 混进 stderr）
+const PS_PREFIX = "$ProgressPreference='SilentlyContinue'\n$ErrorActionPreference='Stop'\n[Console]::OutputEncoding=[Text.Encoding]::UTF8\n";
+
+// PowerShell 单引号字面量，内部单引号翻倍
+function psQuote(value: string): string {
+	return `'${value.replaceAll("'", "''")}'`;
+}
+
+// 远端脚本包装：bash 直发，PowerShell 走 UTF-16LE base64，免引号转义且远端默认 shell 是 cmd 也照跑
+function remoteScript(script: string): string {
+	if (!isPowerShellRemote()) return script;
+	// 必须套 try/catch：PS 5.1 会把未捕获的报错以 CLIXML 序列化到 stderr，模型只能看到垃圾
+	const body = `${PS_PREFIX}try {\n${script}\n} catch {\n[Console]::Error.WriteLine($_.Exception.Message)\nexit 1\n}`;
+	const encoded = Buffer.from(body, "utf16le").toString("base64");
+	return `powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+}
+
+// Windows 远端路径统一为正斜杠形式，各工具与本地正则都以 / 为准
+function normalizeRemotePath(value: string): string {
+	return value.replaceAll("\\", "/").replace(/\/+$/, "");
+}
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+	".png": "image/png",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif": "image/gif",
+	".webp": "image/webp",
+};
 
 export interface SshTarget {
 	remote: string;
@@ -89,7 +131,8 @@ function buildSshInvocation(remote: string, command: string): { bin: string; arg
 }
 
 // 无密码时走原生 ssh（key 认证），有密码时走 plink -pw
-function execShell(remote: string, command: string, input?: Buffer): Promise<Buffer> {
+function execShell(remote: string, script: string, input?: Buffer): Promise<Buffer> {
+	const command = remoteScript(script);
 	const pass = process.env.PI_WEB_SSH_PASSWORD;
 	if (!pass) {
 		return sshOutput(remote, command, input);
@@ -250,7 +293,11 @@ function spawnPlink(remote: string, command: string, options: PlinkRunOptions, f
 			chunks.push(d);
 			onData?.(d);
 		});
-		child.stderr.on("data", (d) => errChunks.push(d));
+		child.stderr.on("data", (d) => {
+			// stderr 同样并入输出，否则根本看不到命令失败的原因
+			errChunks.push(d);
+			onData?.(d);
+		});
 		const timer = options.timeout
 			? setTimeout(() => {
 					timedOut = true;
@@ -323,7 +370,7 @@ function restoreRemoteText(text: string, localCwd: string, ssh: SshTarget): stri
 				return match;
 			}
 		})
-		.replace(relative, (match) => `/${match.slice(SSH_NAMESPACE.length + 1)}`);
+		.replace(relative, (match) => mirrorRelativeToRemote(match.slice(SSH_NAMESPACE.length + 1)));
 }
 
 /** SSH 模式下统一还原返回内容与错误信息中的路径显示 */
@@ -367,9 +414,24 @@ function mirrorRoot(localCwd: string): string {
 	return path.join(localCwd, SSH_NAMESPACE);
 }
 
-/** 远程绝对路径换算为本地镜像绝对路径，远程 / 对应命名空间根 */
-export function remoteToMirror(remotePath: string, localCwd: string): string {
+/** 远程路径换算为镜像相对段，Windows 盘符的冒号在本地镜像路径里非法，改为同名段 */
+function mirrorRelative(remotePath: string): string {
 	const relative = remotePath.replaceAll("\\", "/").replace(/^\/+/, "");
+	return relative.replace(/^([A-Za-z]):(?=\/|$)/, "$1");
+}
+
+/** 镜像相对段还原为远程绝对路径，PowerShell 远端补回盘符冒号 */
+function mirrorRelativeToRemote(relative: string): string {
+	if (isPowerShellRemote()) {
+		const drive = relative.match(/^([A-Za-z])(?=\/|$)/);
+		if (drive) return `${drive[1]}:${relative.slice(1)}`;
+	}
+	return relative === "" ? "/" : `/${relative}`;
+}
+
+/** 远程绝对路径换算为本地镜像绝对路径，远程根对应命名空间根 */
+export function remoteToMirror(remotePath: string, localCwd: string): string {
+	const relative = mirrorRelative(remotePath);
 	return relative === "" ? mirrorRoot(localCwd) : path.join(mirrorRoot(localCwd), ...relative.split("/"));
 }
 
@@ -379,7 +441,7 @@ function toRemotePath(filePath: string, localCwd: string, remoteCwd: string): st
 	if (foldCase(stripTrailingSlash(filePath)) === foldCase(stripTrailingSlash(localCwd))) return remoteCwd;
 	const relative = relativeWithin(filePath, mirrorRoot(localCwd));
 	if (relative === null) throw new Error(`路径不在 SSH 命名空间内: ${filePath}`);
-	return relative === "" ? "/" : `/${relative}`;
+	return mirrorRelativeToRemote(relative);
 }
 
 function quoteRemoteArg(value: string): string {
@@ -391,7 +453,14 @@ export function resolveRemotePath(input: string, localCwd: string, ssh: SshTarge
 	const normalized = input.replaceAll("\\", "/");
 	// SDK 回传的镜像形式还原为远程路径
 	const mirrored = relativeWithin(normalized, mirrorRoot(localCwd));
-	if (mirrored !== null) return mirrored === "" ? "/" : `/${mirrored}`;
+	if (mirrored !== null) return mirrorRelativeToRemote(mirrored);
+	// Windows 远端：盘符绝对路径按远端语义原样保留
+	if (isPowerShellRemote()) {
+		if (normalized === "~") return ssh.remoteHome;
+		if (normalized.startsWith("~/")) return path.posix.normalize(path.posix.join(ssh.remoteHome, normalized.slice(2)));
+		if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")) return path.posix.normalize(normalized);
+		return path.posix.normalize(path.posix.join(ssh.remoteCwd, normalized));
+	}
 	if (process.platform === "win32" && /^[A-Za-z]:\//.test(normalized)) {
 		throw new Error(`${input} 不是远程路径；远程可访问任意绝对路径（如 /etc/hosts）`);
 	}
@@ -410,21 +479,32 @@ export function toMirrorPath(input: string, localCwd: string, ssh: SshTarget): s
 
 // 一次连接取回远端 cwd 与 $HOME，用于路径镜像
 async function probeRemotePaths(remote: string): Promise<{ cwd: string; home: string }> {
-	const lines = (await execShell(remote, `pwd; printf '%s\n' "$HOME"`))
+	const script = isPowerShellRemote() ? "(Get-Location).Path; $HOME" : `pwd; printf '%s\n' "$HOME"`;
+	const lines = (await execShell(remote, script))
 		.toString()
 		.split(/\r?\n/)
-		.map((line) => line.trim())
+		.map((line) => (isPowerShellRemote() ? normalizeRemotePath(line) : line.trim()))
 		.filter(Boolean);
 	const cwd = lines[0] ?? "/";
 	return { cwd, home: lines[1] ?? cwd };
 }
 
 async function remotePathExists(remote: string, remotePath: string): Promise<boolean> {
+	if (isPowerShellRemote()) {
+		const output = await execShell(remote, `Test-Path -LiteralPath ${psQuote(remotePath)}`);
+		return output.toString().trim().toLowerCase() === "true";
+	}
 	const output = await execShell(
 		remote,
 		`if test -e ${quoteRemoteArg(remotePath)}; then printf 1; else printf 0; fi`,
 	);
 	return output.toString().trim() === "1";
+}
+
+// PowerShell 远端目录判定
+async function remotePathIsDirectory(remote: string, remotePath: string): Promise<boolean> {
+	const output = await execShell(remote, `(Get-Item -LiteralPath ${psQuote(remotePath)} -Force).PSIsContainer`);
+	return output.toString().trim().toLowerCase() === "true";
 }
 
 async function resolveRemoteGrepTool(remote: string): Promise<"rg" | "grep"> {
@@ -528,44 +608,153 @@ function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string
 	return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
 }
 
+function createPowerShellLsOps(remote: string, remoteCwd: string, localCwd: string): LsOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		exists: (p) => remotePathExists(remote, toRemote(p)),
+		stat: async (p) => {
+			const remotePath = toRemote(p);
+			if (!(await remotePathExists(remote, remotePath))) throw new Error(`Path not found: ${p}`);
+			const isDirectory = await remotePathIsDirectory(remote, remotePath);
+			return { isDirectory: () => isDirectory };
+		},
+		readdir: async (p) => {
+			const output = await execShell(
+				remote,
+				`Get-ChildItem -LiteralPath ${psQuote(toRemote(p))} -Force | Select-Object -ExpandProperty Name`,
+			);
+			return output.toString().split(/\r?\n/).filter(Boolean);
+		},
+	};
+}
+
+function createPowerShellFindOps(remote: string, remoteCwd: string, localCwd: string): FindOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		exists: (p) => remotePathExists(remote, toRemote(p)),
+		glob: async (pattern, cwd, { ignore, limit }) => {
+			const searchRoot = toRemote(cwd);
+			const maxResults = Math.max(1, Math.floor(limit));
+			// 远端用 .NET 正则过滤（-match 默认不区分大小写），只回传命中的绝对路径
+			const output = await execShell(
+				remote,
+				[
+					`$root = ${psQuote(searchRoot)}`,
+					`$pat = ${psQuote(globToFindRegex(pattern, searchRoot))}`,
+					`$ign = @(${ignore.map((item) => psQuote(globToFindRegex(item, searchRoot))).join(", ")})`,
+					`$max = ${maxResults}`,
+					"$n = 0",
+					"foreach ($f in (Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue)) {",
+					"  $p = $f.FullName.Replace('\\','/')",
+					"  $hit = $p -match $pat",
+					"  if ($hit) { foreach ($r in $ign) { if ($p -match $r) { $hit = $false; break } } }",
+					"  if ($hit) { $p; $n++ }",
+					"  if ($n -ge $max) { break }",
+					"}",
+				].join("\n"),
+			);
+			return output.toString().split(/\r?\n/).filter(Boolean).map((p) => remoteToMirror(p, localCwd));
+		},
+	};
+}
+
+function createPowerShellReadOps(remote: string, remoteCwd: string, localCwd: string): ReadOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		// 字节直传：文本不被本地解码器改写，图片也保留原始数据
+		readFile: async (p) => {
+			const output = await execShell(remote, `[Convert]::ToBase64String([IO.File]::ReadAllBytes(${psQuote(toRemote(p))}))`);
+			return Buffer.from(output.toString().trim(), "base64");
+		},
+		access: async (p) => {
+			await execShell(remote, `Get-Item -LiteralPath ${psQuote(toRemote(p))} -Force | Out-Null`);
+		},
+		// Windows 远端没有 file 命令，图片类型按扩展名判断
+		detectImageMimeType: async (p) => IMAGE_MIME_BY_EXTENSION[path.posix.extname(toRemote(p)).toLowerCase()] ?? null,
+	};
+}
+
+function createPowerShellWriteOps(remote: string, remoteCwd: string, localCwd: string): WriteOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		// 内容走 base64 与 stdin，避开命令行长度上限
+		writeFile: async (p, content) => {
+			const script = `[IO.File]::WriteAllBytes(${psQuote(toRemote(p))}, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`;
+			await execShell(remote, script, Buffer.from(content, "utf8").toString("base64"));
+		},
+		mkdir: async (dir) => {
+			await execShell(remote, `[IO.Directory]::CreateDirectory(${psQuote(toRemote(dir))}) | Out-Null`);
+		},
+	};
+}
+
+function createPowerShellEditOps(remote: string, remoteCwd: string, localCwd: string): EditOperations {
+	const r = createPowerShellReadOps(remote, remoteCwd, localCwd);
+	const w = createPowerShellWriteOps(remote, remoteCwd, localCwd);
+	return { readFile: r.readFile, access: r.access, writeFile: w.writeFile };
+}
+
+/** 原生 ssh 执行（key 认证），输出按块回调 */
+function sshRun(remote: string, cmd: string, options: { onData?: (d: Buffer) => void; signal?: AbortSignal; timeout?: number }): Promise<{ exitCode: number | null }> {
+	return new Promise((resolve, reject) => {
+		const { bin, args, env } = buildSshInvocation(remote, cmd);
+		const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env });
+		let timedOut = false;
+		const timer = options.timeout
+			? setTimeout(() => {
+					timedOut = true;
+					child.kill();
+				}, options.timeout * 1000)
+			: undefined;
+		child.stdout.on("data", (d) => options.onData?.(d));
+		child.stderr.on("data", (d) => options.onData?.(d));
+		child.on("error", (e) => {
+			if (timer) clearTimeout(timer);
+			reject(e);
+		});
+		const onAbort = () => child.kill();
+		options.signal?.addEventListener("abort", onAbort, { once: true });
+		child.on("close", (code) => {
+			if (timer) clearTimeout(timer);
+			options.signal?.removeEventListener("abort", onAbort);
+			if (options.signal?.aborted) reject(new Error("aborted"));
+			else if (timedOut) reject(new Error(`timeout:${options.timeout}`));
+			else resolve({ exitCode: code });
+		});
+	});
+}
+
 function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
 	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
-	const sshRun = (cmd: string, options: { onData?: (d: Buffer) => void; signal?: AbortSignal; timeout?: number }) =>
-		new Promise<{ exitCode: number | null }>((resolve, reject) => {
-			const { bin, args, env } = buildSshInvocation(remote, cmd);
-			const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env });
-			let timedOut = false;
-			const timer = options.timeout
-				? setTimeout(() => {
-						timedOut = true;
-						child.kill();
-					}, options.timeout * 1000)
-				: undefined;
-			child.stdout.on("data", (d) => options.onData?.(d));
-			child.stderr.on("data", (d) => options.onData?.(d));
-			child.on("error", (e) => {
-				if (timer) clearTimeout(timer);
-				reject(e);
-			});
-			const onAbort = () => child.kill();
-			options.signal?.addEventListener("abort", onAbort, { once: true });
-			child.on("close", (code) => {
-				if (timer) clearTimeout(timer);
-				options.signal?.removeEventListener("abort", onAbort);
-				if (options.signal?.aborted) reject(new Error("aborted"));
-				else if (timedOut) reject(new Error(`timeout:${options.timeout}`));
-				else resolve({ exitCode: code });
-			});
-		});
 	return {
 		exec: (command, cwd, { onData, signal, timeout }) => {
 			const cmd = `cd ${JSON.stringify(toRemote(cwd))} && ${command}`;
 			if (process.env.PI_WEB_SSH_PASSWORD) {
 				return plinkOutput(remote, cmd, { onData, signal, timeout }).then((r) => ({ exitCode: r.code ?? 1 }));
 			}
-			return sshRun(cmd, { onData, signal, timeout });
+			return sshRun(remote, cmd, { onData, signal, timeout });
 		},
 	};
+}
+
+function createPowerShellRemoteOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
+	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
+	return {
+		exec: (command, cwd, { onData, signal, timeout }) => {
+			const cmd = remoteScript(`Set-Location -LiteralPath ${psQuote(toRemote(cwd))}\n${command}`);
+			if (process.env.PI_WEB_SSH_PASSWORD) {
+				return plinkOutput(remote, cmd, { onData, signal, timeout }).then((r) => ({ exitCode: r.code ?? 1 }));
+			}
+			return sshRun(remote, cmd, { onData, signal, timeout });
+		},
+	};
+}
+
+/** 远端 shell 工具的 operations，按当前远端 shell 分派 */
+function remoteShellOps(remote: string, remoteCwd: string, localCwd: string): BashOperations {
+	return isPowerShellRemote()
+		? createPowerShellRemoteOps(remote, remoteCwd, localCwd)
+		: createRemoteBashOps(remote, remoteCwd, localCwd);
 }
 
 async function executeRemoteGrep(
@@ -620,6 +809,95 @@ async function executeRemoteGrep(
 	};
 }
 
+/** grep 的 glob 过滤：无斜杠的 glob 按 rg 习惯匹配任意层级 */
+function grepGlobRegex(glob: string, searchRoot: string): string {
+	return globToFindRegex(glob.includes("/") ? glob : `**/${glob}`, searchRoot);
+}
+
+/** PowerShell 远端 grep：远端只回传命中行的 JSON，上下文与显示格式在本地拼装 */
+async function executePowerShellGrep(ssh: SshTarget, localCwd: string, params: unknown, signal?: AbortSignal) {
+	if (signal?.aborted) throw new Error("Operation aborted");
+	const input = params as {
+		pattern: string;
+		path?: string;
+		glob?: string;
+		ignoreCase?: boolean;
+		literal?: boolean;
+		context?: number;
+		limit?: number;
+	};
+	const remotePath = input.path ? resolveRemotePath(input.path, localCwd, ssh) : ssh.remoteCwd;
+	if (!(await remotePathExists(ssh.remote, remotePath))) throw new Error(`Path not found: ${input.path ?? remotePath}`);
+	const isDirectory = await remotePathIsDirectory(ssh.remote, remotePath);
+	const workDir = isDirectory ? remotePath : path.posix.dirname(remotePath);
+	const limit = Math.max(1, Math.floor(input.limit ?? 100));
+	const context = input.context && input.context > 0 ? Math.floor(input.context) : 0;
+	const pattern = input.literal ? escapeRegExp(input.pattern) : input.pattern;
+	const script = [
+		`$root = ${psQuote(remotePath)}`,
+		`$isFile = ${isDirectory ? "$false" : "$true"}`,
+		`$rx = New-Object System.Text.RegularExpressions.Regex(${psQuote(pattern)}, [System.Text.RegularExpressions.RegexOptions]::${input.ignoreCase ? "IgnoreCase" : "None"})`,
+		`$glob = ${input.glob ? psQuote(grepGlobRegex(input.glob, workDir)) : "$null"}`,
+		`$max = ${limit}`,
+		"$n = 0",
+		"$files = if ($isFile) { @(Get-Item -LiteralPath $root -Force) } else { @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue) }",
+		"foreach ($f in $files) {",
+		"  $p = $f.FullName.Replace('\\','/')",
+		"  if ($p -like '*/node_modules/*' -or $p -like '*/.git/*') { continue }",
+		"  if ($glob -and -not ($p -match $glob)) { continue }",
+		"  $lines = $null",
+		"  try { $lines = [IO.File]::ReadAllLines($f.FullName) } catch { continue }",
+		"  for ($i = 0; $i -lt $lines.Length; $i++) {",
+		"    if ($rx.IsMatch($lines[$i])) {",
+		"      ConvertTo-Json -InputObject @{ path = $p; line = $i + 1; text = $lines[$i] } -Compress",
+		"      $n++",
+		"      if ($n -ge $max) { break }",
+		"    }",
+		"  }",
+		"  if ($n -ge $max) { break }",
+		"}",
+	].join("\n");
+	const output = (await execShell(ssh.remote, script)).toString().trim();
+	if (!output) return { content: [{ type: "text" as const, text: "No matches found" }], details: undefined };
+	const matches = output
+		.split(/\r?\n/)
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as { path: string; line: number; text: string });
+	const formatPath = (filePath: string) =>
+		isDirectory ? path.posix.relative(workDir, filePath).replaceAll("\\", "/") : path.posix.basename(filePath);
+	const fileCache = new Map<string, string[]>();
+	const readRemoteLines = async (filePath: string) => {
+		let lines = fileCache.get(filePath);
+		if (!lines) {
+			const raw = await execShell(ssh.remote, `[Convert]::ToBase64String([IO.File]::ReadAllBytes(${psQuote(filePath)}))`);
+			lines = Buffer.from(raw.toString().trim(), "base64").toString("utf8").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+			fileCache.set(filePath, lines);
+		}
+		return lines;
+	};
+	const outputLines: string[] = [];
+	for (const match of matches) {
+		const relative = formatPath(match.path);
+		if (context === 0) {
+			outputLines.push(`${relative}:${match.line}: ${match.text}`);
+			continue;
+		}
+		const lines = await readRemoteLines(match.path);
+		const start = Math.max(1, match.line - context);
+		const end = Math.min(lines.length, match.line + context);
+		for (let current = start; current <= end; current++) {
+			const text = (lines[current - 1] ?? "").replace(/\r/g, "");
+			// 匹配行用冒号、上下文行用短横，与 SDK 的 grep 显示一致
+			outputLines.push(current === match.line ? `${relative}:${current}: ${text}` : `${relative}-${current}- ${text}`);
+		}
+	}
+	const matchLimitReached = matches.length >= limit;
+	const text = matchLimitReached
+		? `${outputLines.join("\n")}\n\n[${limit} matches limit reached. Use limit=${limit * 2} for more, or refine pattern]`
+		: outputLines.join("\n");
+	return { content: [{ type: "text" as const, text }], details: matchLimitReached ? { matchLimitReached: limit } : undefined };
+}
+
 // 宿主的运行时变量不应泄漏给项目命令（与 pi-web sanitize 逻辑一致）
 function sanitizeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const cleaned = { ...env };
@@ -654,6 +932,7 @@ export default function (pi: ExtensionAPI) {
 	const localGrep = createGrepTool(sessionCwd);
 	const localBashOps = createSanitizedLocalBashOps();
 	const localBash = createBashTool(sessionCwd, { operations: localBashOps });
+	const localPowerShell = createPowerShellTool(sessionCwd);
 
 	// Resolved lazily on session_start (CLI flags not available during factory)
 	let resolvedSsh: SshTarget | null = null;
@@ -673,7 +952,11 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? createRemoteReadOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
+			const ops = ssh
+				? (isPowerShellRemote()
+					? createPowerShellReadOps(ssh.remote, ssh.remoteCwd, sessionCwd)
+					: createRemoteReadOps(ssh.remote, ssh.remoteCwd, sessionCwd))
+				: undefined;
 			const tool = createReadTool(sessionCwd, ops ? { operations: ops } : undefined);
 			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
 			if (!ssh) return tool.execute(id, input, signal, onUpdate);
@@ -687,7 +970,11 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? createRemoteWriteOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
+			const ops = ssh
+				? (isPowerShellRemote()
+					? createPowerShellWriteOps(ssh.remote, ssh.remoteCwd, sessionCwd)
+					: createRemoteWriteOps(ssh.remote, ssh.remoteCwd, sessionCwd))
+				: undefined;
 			const tool = createWriteTool(sessionCwd, ops ? { operations: ops } : undefined);
 			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
 			if (!ssh) return tool.execute(id, input, signal, onUpdate);
@@ -706,7 +993,11 @@ export default function (pi: ExtensionAPI) {
 		],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? createRemoteEditOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
+			const ops = ssh
+				? (isPowerShellRemote()
+					? createPowerShellEditOps(ssh.remote, ssh.remoteCwd, sessionCwd)
+					: createRemoteEditOps(ssh.remote, ssh.remoteCwd, sessionCwd))
+				: undefined;
 			const tool = createEditTool(sessionCwd, ops ? { operations: ops } : undefined);
 			const input = ssh ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
 			if (!ssh) return tool.execute(id, input, signal, onUpdate);
@@ -720,7 +1011,11 @@ export default function (pi: ExtensionAPI) {
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
 			if (!ssh) return localLs.execute(id, params, signal, onUpdate);
-			const tool = createLsTool(sessionCwd, { operations: createRemoteLsOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
+			const tool = createLsTool(sessionCwd, {
+				operations: isPowerShellRemote()
+					? createPowerShellLsOps(ssh.remote, ssh.remoteCwd, sessionCwd)
+					: createRemoteLsOps(ssh.remote, ssh.remoteCwd, sessionCwd),
+			});
 			const input = params.path ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
 			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
@@ -732,7 +1027,11 @@ export default function (pi: ExtensionAPI) {
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
 			if (!ssh) return localFind.execute(id, params, signal, onUpdate);
-			const tool = createFindTool(sessionCwd, { operations: createRemoteFindOps(ssh.remote, ssh.remoteCwd, sessionCwd) });
+			const tool = createFindTool(sessionCwd, {
+				operations: isPowerShellRemote()
+					? createPowerShellFindOps(ssh.remote, ssh.remoteCwd, sessionCwd)
+					: createRemoteFindOps(ssh.remote, ssh.remoteCwd, sessionCwd),
+			});
 			const input = params.path ? { ...params, path: toMirrorPath(params.path, sessionCwd, ssh) } : params;
 			return withRemotePaths(sessionCwd, ssh, () => tool.execute(id, input, signal, onUpdate));
 		},
@@ -744,7 +1043,10 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			const ssh = requireSsh();
 			if (!ssh) return localGrep.execute(_id, params, signal);
-			return withRemotePaths(sessionCwd, ssh, () => executeRemoteGrep(ssh, sessionCwd, params, signal));
+			return withRemotePaths(sessionCwd, ssh, () =>
+				isPowerShellRemote()
+					? executePowerShellGrep(ssh, sessionCwd, params, signal)
+					: executeRemoteGrep(ssh, sessionCwd, params, signal));
 		},
 	});
 
@@ -754,8 +1056,21 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: ["You can inspect PI_* environment variables for current model and session details."],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? createRemoteBashOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
+			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
 			const tool = createBashTool(sessionCwd, ops ? { operations: ops } : undefined);
+			return tool.execute(id, params, signal, onUpdate);
+		},
+	});
+
+	// --ps 时注册远端 PowerShell 工具，覆盖内置的那个（内置的会绕过 SSH 打本机）
+	pi.registerTool({
+		...localPowerShell,
+		promptSnippet: "Execute PowerShell commands",
+		promptGuidelines: ["You can inspect PI_* environment variables for current model and session details."],
+		async execute(id, params, signal, onUpdate, _ctx) {
+			const ssh = requireSsh();
+			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
+			const tool = createPowerShellTool(sessionCwd, ops ? { operations: ops } : undefined);
 			return tool.execute(id, params, signal, onUpdate);
 		},
 	});
@@ -766,6 +1081,8 @@ export default function (pi: ExtensionAPI) {
 		// pi-web 经 ssh-launcher 注入 PI_WEB_SSH，pi CLI 直接传 --ssh flag
 		const flag = pi.getFlag("ssh");
 		const arg = process.env.PI_WEB_SSH ?? (typeof flag === "string" ? flag : undefined);
+		// --ps 由 ssh-launcher 注入，远端是 Windows 时整套远端操作改用 PowerShell
+		remoteShell = process.env.PI_WEB_SSH_SHELL === "powershell" ? "powershell" : "bash";
 		if (arg) {
 			try {
 				const sep = arg.indexOf(":");
@@ -780,9 +1097,10 @@ export default function (pi: ExtensionAPI) {
 					remoteCwd: (portOnly || sep < 0 ? probe.cwd : suffix).replace(/\/+$/, "") || "/",
 					remoteHome: probe.home,
 				};
-				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
-				ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
-				console.log(`[pi-web] SSH connected: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`);
+				const shellLabel = isPowerShellRemote() ? " (PowerShell)" : "";
+				ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}${shellLabel}`));
+				ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}${shellLabel}`, "info");
+				console.log(`[pi-web] SSH connected: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}${shellLabel}`);
 			} catch (error) {
 				const detail = error instanceof Error ? error.message : String(error);
 				console.error(`[pi-web] SSH failed: ${detail}`);
@@ -800,7 +1118,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("user_bash", (_event) => {
 		const ssh = requireSsh();
 		if (!ssh) return { operations: localBashOps };
-		return { operations: createRemoteBashOps(ssh.remote, ssh.remoteCwd, sessionCwd) };
+		return { operations: remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) };
 	});
 
 	// 用远端路径覆盖提示词 cwd 段（pi >= 0.86 把它独立成 <cwd> 段，不再是一行文本）
