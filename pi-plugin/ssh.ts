@@ -130,28 +130,53 @@ function buildSshInvocation(remote: string, command: string): { bin: string; arg
 	return { bin: "ssh", args: sshArgs, env: process.env };
 }
 
+// 写文件的 stdin 传输超时（秒）：plink 偶发不送 stdin EOF，远端会永久阻塞，只能靠超时兜底
+const STDIN_TIMEOUT_SEC = 60;
+
+// 带 stdin 的调用超时后换成能看懂的报错，其余错误原样抛出
+function asStdinTimeout(error: unknown, timeout: number | undefined): unknown {
+	const message = error instanceof Error ? error.message : String(error);
+	return timeout !== undefined && message === `timeout:${timeout}`
+		? new Error(`远端 ${timeout}s 内没读完 stdin（plink 未正常关闭输入），已中止，可重试本次写入`)
+		: error;
+}
+
 // 无密码时走原生 ssh（key 认证），有密码时走 plink -pw
 function execShell(remote: string, script: string, input?: Buffer): Promise<Buffer> {
 	const command = remoteScript(script);
 	const pass = process.env.PI_WEB_SSH_PASSWORD;
+	const timeout = input ? STDIN_TIMEOUT_SEC : undefined;
 	if (!pass) {
-		return sshOutput(remote, command, input);
+		return sshOutput(remote, command, input, timeout).catch((error) => {
+			throw asStdinTimeout(error, timeout);
+		});
 	}
-	return plinkOutput(remote, command, input ? { input } : {}).then((r) => {
-		if (r.code !== 0) {
-			const stderr = r.stderr.trim();
-			// plink 失败时原因可能在 stdout，两者都带上才能定位
-			throw new Error(`SSH failed (${r.code}): ${stderr || r.stdout.toString().trim()}`);
-		}
-		return r.stdout;
-	});
+	return plinkOutput(remote, command, input ? { input, timeout } : {})
+		.then((r) => {
+			if (r.code !== 0) {
+				const stderr = r.stderr.trim();
+				// plink 失败时原因可能在 stdout，两者都带上才能定位
+				throw new Error(`SSH failed (${r.code}): ${stderr || r.stdout.toString().trim()}`);
+			}
+			return r.stdout;
+		})
+		.catch((error) => {
+			throw asStdinTimeout(error, timeout);
+		});
 }
 
-function sshOutput(remote: string, command: string, input?: Buffer): Promise<Buffer> {
+function sshOutput(remote: string, command: string, input?: Buffer, timeout?: number): Promise<Buffer> {
 	return new Promise((resolve, reject) => {
 		const { bin, args, env } = buildSshInvocation(remote, command);
 		// 内容走 stdin：大文件当命令行参数会撑爆 Windows 上限（spawn ENAMETOOLONG）
 		const child = spawn(bin, args, { stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], env });
+		let timedOut = false;
+		const timer = timeout
+			? setTimeout(() => {
+					timedOut = true;
+					child.kill();
+				}, timeout * 1000)
+			: undefined;
 		if (input) {
 			// ssh 提前退出时写 stdin 会抛 EPIPE，吞掉即可由 close 分支报错
 			child.stdin.on("error", () => {});
@@ -161,9 +186,15 @@ function sshOutput(remote: string, command: string, input?: Buffer): Promise<Buf
 		const errChunks: Buffer[] = [];
 		child.stdout.on("data", (data) => chunks.push(data));
 		child.stderr.on("data", (data) => errChunks.push(data));
-		child.on("error", reject);
+		child.on("error", (error) => {
+			if (timer) clearTimeout(timer);
+			reject(error);
+		});
 		child.on("close", (code) => {
-			if (code !== 0) {
+			if (timer) clearTimeout(timer);
+			if (timedOut) {
+				reject(new Error(`timeout:${timeout}`));
+			} else if (code !== 0) {
 				const stderr = Buffer.concat(errChunks).toString().trim();
 				// ssh 的部分失败原因只出现在 stdout，两者都带上才能定位
 				const stdout = Buffer.concat(chunks).toString().trim();
@@ -678,9 +709,17 @@ function createPowerShellWriteOps(remote: string, remoteCwd: string, localCwd: s
 	const toRemote = (p: string) => toRemotePath(p, localCwd, remoteCwd);
 	return {
 		// 内容走 base64 与 stdin，避开命令行长度上限
+		// 必须用 PowerShell 自己的输入管道 $input 收：直接读标准输入（[Console]::In.ReadToEnd 或 OpenStandardInput.Read）
+		// 在数据量上来时会永久卡住（实测 >110KB 必卡在 72KB 处，9KB 级别也偶发丢 EOF）
 		writeFile: async (p, content) => {
-			const script = `[IO.File]::WriteAllBytes(${psQuote(toRemote(p))}, [Convert]::FromBase64String([Console]::In.ReadToEnd()))`;
-			await execShell(remote, script, Buffer.from(content, "utf8").toString("base64"));
+			const base64 = Buffer.from(content, "utf8").toString("base64");
+			const script = [
+				'$b64 = ($input | Out-String).Replace("`r", "").Replace("`n", "")',
+				`if ($b64.Length -ne ${base64.length}) { throw "stdin 只到 $($b64.Length)/${base64.length} 字符" }`,
+				`[IO.File]::WriteAllBytes(${psQuote(toRemote(p))}, [Convert]::FromBase64String($b64))`,
+			].join("\n");
+			// 末尾补换行，$input 按行喂进来
+			await execShell(remote, script, Buffer.from(`${base64}\n`, "ascii"));
 		},
 		mkdir: async (dir) => {
 			await execShell(remote, `[IO.Directory]::CreateDirectory(${psQuote(toRemote(dir))}) | Out-Null`);
