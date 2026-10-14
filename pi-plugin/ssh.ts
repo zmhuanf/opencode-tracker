@@ -131,7 +131,7 @@ function buildSshInvocation(remote: string, command: string): { bin: string; arg
 }
 
 // 写文件的 stdin 传输超时（秒）：plink 偶发不送 stdin EOF，远端会永久阻塞，只能靠超时兜底
-const STDIN_TIMEOUT_SEC = 60;
+const STDIN_TIMEOUT_SEC = 15;
 
 // 带 stdin 的调用超时后换成能看懂的报错，其余错误原样抛出
 function asStdinTimeout(error: unknown, timeout: number | undefined): unknown {
