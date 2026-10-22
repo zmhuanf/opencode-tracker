@@ -32,6 +32,7 @@ import {
 	createFindTool,
 	createGrepTool,
 	createLocalBashOperations,
+	createLocalPowerShellOperations,
 	createLsTool,
 	createPowerShellTool,
 	createReadTool,
@@ -937,12 +938,23 @@ async function executePowerShellGrep(ssh: SshTarget, localCwd: string, params: u
 	return { content: [{ type: "text" as const, text }], details: matchLimitReached ? { matchLimitReached: limit } : undefined };
 }
 
-// 宿主的运行时变量不应泄漏给项目命令（与 pi-web sanitize 逻辑一致）
+// 宿主的运行时变量不应泄漏给项目命令
 function sanitizeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const cleaned = { ...env };
 	for (const key of Object.keys(cleaned)) {
 		const comparable = process.platform === "win32" ? key.toUpperCase() : key;
-		if (comparable === "PORT" || comparable === "NODE_ENV" || comparable.startsWith("NEXT_")) {
+		// npm run 起的服务把自身的调用信息也带进了子进程
+		const fromNpm = key.toLowerCase().startsWith("npm_");
+		if (
+			fromNpm
+			|| comparable === "PORT"
+			|| comparable === "NODE_ENV"
+			|| comparable === "INIT_CWD"
+			|| comparable === "PI_WEB_PASSWORD"
+			|| comparable === "PI_WEB_SSH_PASSWORD"
+			|| comparable.startsWith("NEXT_")
+			|| comparable.startsWith("__NEXT_")
+		) {
 			delete cleaned[key];
 		}
 	}
@@ -952,6 +964,15 @@ function sanitizeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // 本地执行时清洗 env，阻断宿主变量透传
 function createSanitizedLocalBashOps(): BashOperations {
 	const local = createLocalBashOperations();
+	return {
+		exec: (command, execCwd, options) =>
+			local.exec(command, execCwd, { ...options, env: sanitizeEnv(options.env ?? process.env) }),
+	};
+}
+
+// 本地 PowerShell 走同一套清洗，否则它绕过 bash 那条路
+function createSanitizedLocalPowerShellOps(): BashOperations {
+	const local = createLocalPowerShellOperations();
 	return {
 		exec: (command, execCwd, options) =>
 			local.exec(command, execCwd, { ...options, env: sanitizeEnv(options.env ?? process.env) }),
@@ -1095,8 +1116,8 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: ["You can inspect PI_* environment variables for current model and session details."],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
-			const tool = createBashTool(sessionCwd, ops ? { operations: ops } : undefined);
+			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : createSanitizedLocalBashOps();
+			const tool = createBashTool(sessionCwd, { operations: ops });
 			return tool.execute(id, params, signal, onUpdate);
 		},
 	});
@@ -1108,8 +1129,8 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: ["You can inspect PI_* environment variables for current model and session details."],
 		async execute(id, params, signal, onUpdate, _ctx) {
 			const ssh = requireSsh();
-			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : undefined;
-			const tool = createPowerShellTool(sessionCwd, ops ? { operations: ops } : undefined);
+			const ops = ssh ? remoteShellOps(ssh.remote, ssh.remoteCwd, sessionCwd) : createSanitizedLocalPowerShellOps();
+			const tool = createPowerShellTool(sessionCwd, { operations: ops });
 			return tool.execute(id, params, signal, onUpdate);
 		},
 	});
