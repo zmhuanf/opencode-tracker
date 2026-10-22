@@ -1,4 +1,4 @@
 {
-  "summaryModel": "command/deepseek/deepseek-v4.1-flash",
+  "summaryModel": "qianwen/deepseek-v4.1-flash-1017",
   "workflow": "auto-summary"
 }
